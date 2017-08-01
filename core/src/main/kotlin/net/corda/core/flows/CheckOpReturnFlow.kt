@@ -10,7 +10,6 @@ import net.corda.core.identity.Party
 
 object checkOpReturnFlow
 {
-
     fun checkIfOpReturnTxIsPresent(txHash : String) : Boolean
     {
         val url = "https://opreturn.herokuapp.com/v2/readOpReturnTx/" + txHash
@@ -20,15 +19,13 @@ object checkOpReturnFlow
 
     //gets other nodes tx history and checks if they are submitted as OP Return txs in bitcoin testnet
 
-    class Acceptor(val rcv: Party) : FlowLogic<Unit>()
+    class Acceptor(val rcv: Party): FlowLogic<Unit>()
     {
-        //send back txs here
         @Suspendable
         override fun call()
         {
-            val txHashes = serviceHub.validatedTransactions.track().snapshot.map { it.id }
-            println(txHashes)
-            send(rcv, arrayListOf(txHashes))
+            val txHashes = serviceHub.validatedTransactions.track().snapshot.map { it.id }.toTypedArray()
+            send(rcv, txHashes)
         }
     }
 
@@ -38,9 +35,6 @@ object checkOpReturnFlow
         @Suspendable
         override fun call() : MutableMap<String, Boolean>
         {
-            val notary = serviceHub.networkMapCache.notaryNodes.single().notaryIdentity
-            val me = serviceHub.myInfo.legalIdentity
-            val otherNode = serviceHub.networkMapCache.getNodeByLegalIdentityKey(rcv.owningKey)
             val send = sendAndReceive<List<String>>(rcv, "Requesting your txs")
             println("this is the send: " + send)
 
