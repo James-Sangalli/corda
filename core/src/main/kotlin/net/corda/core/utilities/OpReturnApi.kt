@@ -5,6 +5,9 @@ import com.github.kittinunf.fuel.httpPost
  * Created by sangalli on 17/2/17.
  */
 
+//Uses Bitcoin's immutability to store tx hashes in an OP_RETURN slot on the testnet for free
+//Allows for extra redundancy and prevents he said she said
+
 class OpReturnApi
 {
     companion object
