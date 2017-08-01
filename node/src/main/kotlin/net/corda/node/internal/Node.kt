@@ -1,44 +1,50 @@
 package net.corda.node.internal
 
 import com.codahale.metrics.JmxReporter
-import com.google.common.net.HostAndPort
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import net.corda.core.div
+import com.google.common.util.concurrent.SettableFuture
 import net.corda.core.flatMap
-import net.corda.core.getOrThrow
 import net.corda.core.messaging.RPCOps
 import net.corda.core.node.ServiceHub
 import net.corda.core.node.services.ServiceInfo
-import net.corda.core.node.services.ServiceType
-import net.corda.core.node.services.UniquenessProvider
-import net.corda.core.utilities.loggerFor
-import net.corda.node.printBasicNodeInfo
+import net.corda.core.serialization.SerializationDefaults
+import net.corda.core.thenMatch
+import net.corda.core.utilities.*
+import net.corda.node.VersionInfo
+import net.corda.node.serialization.KryoServerSerializationScheme
 import net.corda.node.serialization.NodeClock
 import net.corda.node.services.RPCUserService
 import net.corda.node.services.RPCUserServiceImpl
-import net.corda.node.services.api.MessagingServiceInternal
 import net.corda.node.services.config.FullNodeConfiguration
-import net.corda.node.services.messaging.ArtemisMessagingComponent.NetworkMapAddress
 import net.corda.node.services.messaging.ArtemisMessagingServer
+import net.corda.node.services.messaging.ArtemisMessagingServer.Companion.ipDetectRequestProperty
+import net.corda.node.services.messaging.ArtemisMessagingServer.Companion.ipDetectResponseProperty
+import net.corda.node.services.messaging.MessagingService
 import net.corda.node.services.messaging.NodeMessagingClient
-import net.corda.node.services.transactions.PersistentUniquenessProvider
-import net.corda.node.services.transactions.RaftUniquenessProvider
-import net.corda.node.services.transactions.RaftValidatingNotaryService
-import net.corda.node.services.transactions.BFTSmartUniquenessProvider
-import net.corda.node.services.transactions.BFTValidatingNotaryService
+import net.corda.node.utilities.AddressUtils
 import net.corda.node.utilities.AffinityExecutor
-import net.corda.node.utilities.databaseTransaction
-import org.jetbrains.exposed.sql.Database
-import java.io.RandomAccessFile
-import java.lang.management.ManagementFactory
-import java.nio.channels.FileLock
-import java.nio.file.Files
-import java.nio.file.Paths
+import net.corda.nodeapi.ArtemisMessagingComponent
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.IP_REQUEST_PREFIX
+import net.corda.nodeapi.ArtemisMessagingComponent.Companion.PEER_USER
+import net.corda.nodeapi.ArtemisMessagingComponent.NetworkMapAddress
+import net.corda.nodeapi.ArtemisTcpTransport
+import net.corda.nodeapi.ConnectionDirection
+import net.corda.nodeapi.internal.ShutdownHook
+import net.corda.nodeapi.internal.addShutdownHook
+import net.corda.nodeapi.serialization.*
+import org.apache.activemq.artemis.api.core.ActiveMQNotConnectedException
+import org.apache.activemq.artemis.api.core.RoutingType
+import org.apache.activemq.artemis.api.core.client.ActiveMQClient
+import org.apache.activemq.artemis.api.core.client.ClientMessage
+import org.bouncycastle.asn1.x500.X500Name
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import java.io.IOException
 import java.time.Clock
+import java.util.*
 import javax.management.ObjectName
-import javax.servlet.*
-import kotlin.concurrent.thread
+import kotlin.system.exitProcess
 
 /**
  * A Node manages a standalone server that takes part in the P2P network. It creates the services found in [ServiceHub],
@@ -49,11 +55,33 @@ import kotlin.concurrent.thread
  * but nodes are not required to advertise services they run (hence subset).
  * @param clock The clock used within the node and by all flows etc.
  */
-class Node(override val configuration: FullNodeConfiguration,
-           advertisedServices: Set<ServiceInfo>,
-           clock: Clock = NodeClock()) : AbstractNode(configuration, advertisedServices, clock) {
-    override val log = loggerFor<Node>()
+open class Node(override val configuration: FullNodeConfiguration,
+                advertisedServices: Set<ServiceInfo>,
+                val versionInfo: VersionInfo,
+                clock: Clock = NodeClock(),
+                val initialiseSerialization: Boolean = true) : AbstractNode(configuration, advertisedServices, clock) {
+    companion object {
+        private val logger = loggerFor<Node>()
+        var renderBasicInfoToConsole = true
+
+        /** Used for useful info that we always want to show, even when not logging to the console */
+        fun printBasicNodeInfo(description: String, info: String? = null) {
+            val msg = if (info == null) description else "${description.padEnd(40)}: $info"
+            val loggerName = if (renderBasicInfoToConsole) "BasicInfo" else "Main"
+            LoggerFactory.getLogger(loggerName).info(msg)
+        }
+
+        internal fun failStartUp(message: String): Nothing {
+            println(message)
+            println("Corda will now exit...")
+            exitProcess(1)
+        }
+    }
+
+    override val log: Logger get() = logger
+    override val platformVersion: Int get() = versionInfo.platformVersion
     override val networkMapAddress: NetworkMapAddress? get() = configuration.networkMapService?.address?.let(::NetworkMapAddress)
+    override fun makeTransactionVerifierService() = (network as NodeMessagingClient).verifierService
 
     // DISCUSSION
     //
@@ -96,59 +124,128 @@ class Node(override val configuration: FullNodeConfiguration,
 
     var messageBroker: ArtemisMessagingServer? = null
 
-    // Avoid the lock being garbage collected. We don't really need to release it as the OS will do so for us
-    // when our process shuts down, but we try in stop() anyway just to be nice.
-    private var nodeFileLock: FileLock? = null
-
-    private var shutdownThread: Thread? = null
+    private var shutdownHook: ShutdownHook? = null
 
     private lateinit var userService: RPCUserService
 
-    init {
-        checkVersionUnchanged()
+    override fun makeMessagingService(): MessagingService {
+        userService = RPCUserServiceImpl(configuration.rpcUsers)
+
+        val (serverAddress, advertisedAddress) = with(configuration) {
+            if (messagingServerAddress != null) {
+                // External broker
+                messagingServerAddress to messagingServerAddress
+            } else {
+                makeLocalMessageBroker() to getAdvertisedAddress()
+            }
+        }
+
+        printBasicNodeInfo("Incoming connection address", advertisedAddress.toString())
+
+        val myIdentityOrNullIfNetworkMapService = if (networkMapAddress != null) obtainLegalIdentity().owningKey else null
+        return NodeMessagingClient(
+                configuration,
+                versionInfo,
+                serverAddress,
+                myIdentityOrNullIfNetworkMapService,
+                serverThread,
+                database,
+                networkMapRegistrationFuture,
+                services.monitoringService,
+                advertisedAddress)
+    }
+
+    private fun makeLocalMessageBroker(): NetworkHostAndPort {
+        with(configuration) {
+            messageBroker = ArtemisMessagingServer(this, p2pAddress.port, rpcAddress?.port, services.networkMapCache, userService)
+            return NetworkHostAndPort("localhost", p2pAddress.port)
+        }
+    }
+
+    private fun getAdvertisedAddress(): NetworkHostAndPort {
+        return with(configuration) {
+            val useHost = if (detectPublicIp) {
+                tryDetectIfNotPublicHost(p2pAddress.host) ?: p2pAddress.host
+            } else {
+                p2pAddress.host
+            }
+            NetworkHostAndPort(useHost, p2pAddress.port)
+        }
     }
 
     /**
-     * Abort starting the node if an existing deployment with a different version is detected in the current directory.
-     * The current version is expected to be specified as a system property. If not provided, the check will be ignored.
+     * Checks whether the specified [host] is a public IP address or hostname. If not, tries to discover the current
+     * machine's public IP address to be used instead. It first looks through the network interfaces, and if no public IP
+     * is found, asks the network map service to provide it.
      */
-    private fun checkVersionUnchanged() {
-        val currentVersion = System.getProperty("corda.version") ?: return
-        val versionFile = Paths.get("version")
-        if (Files.exists(versionFile)) {
-            val existingVersion = Files.readAllLines(versionFile)[0]
-            check(existingVersion == currentVersion) {
-                "Version change detected - current: $currentVersion, existing: $existingVersion. Node upgrades are not yet supported."
+    private fun tryDetectIfNotPublicHost(host: String): String? {
+        if (!AddressUtils.isPublic(host)) {
+            val foundPublicIP = AddressUtils.tryDetectPublicIP()
+
+            if (foundPublicIP == null) {
+                networkMapAddress?.let { return discoverPublicHost(it.hostAndPort) }
+            } else {
+                log.info("Detected public IP: ${foundPublicIP.hostAddress}. This will be used instead of the provided \"$host\" as the advertised address.")
+                return foundPublicIP.hostAddress
             }
-        } else {
-            Files.write(versionFile, currentVersion.toByteArray())
         }
+        return null
     }
 
-    override fun makeMessagingService(): MessagingServiceInternal {
-        userService = RPCUserServiceImpl(configuration)
-
-        val serverAddress = with(configuration) {
-            messagingServerAddress ?: {
-                messageBroker = ArtemisMessagingServer(this, artemisAddress, services.networkMapCache, userService)
-                artemisAddress
-            }()
+    /**
+     * Asks the network map service to provide this node's public IP address:
+     * - Connects to the network map service's message broker and creates a special IP request queue with a custom
+     * request id. Marks the established session with the same request id.
+     * - On the server side a special post-queue-creation callback is fired. It finds the session matching the request id
+     * encoded in the queue name. It then extracts the remote IP from the session details and posts a message containing
+     * it back to the queue.
+     * - Once the message is received the session is closed and the queue deleted.
+     */
+    private fun discoverPublicHost(serverAddress: NetworkHostAndPort): String? {
+        log.trace { "Trying to detect public hostname through the Network Map Service at $serverAddress" }
+        val tcpTransport = ArtemisTcpTransport.tcpTransport(ConnectionDirection.Outbound(), serverAddress, configuration)
+        val locator = ActiveMQClient.createServerLocatorWithoutHA(tcpTransport).apply {
+            initialConnectAttempts = 5
+            retryInterval = 5.seconds.toMillis()
+            retryIntervalMultiplier = 1.5
+            maxRetryInterval = 3.minutes.toMillis()
         }
-        val myIdentityOrNullIfNetworkMapService = if (networkMapAddress != null) obtainLegalIdentity().owningKey else null
-        return NodeMessagingClient(configuration, serverAddress, myIdentityOrNullIfNetworkMapService, serverThread, database,
-                networkMapRegistrationFuture)
+        val clientFactory = try {
+            locator.createSessionFactory()
+        } catch (e: ActiveMQNotConnectedException) {
+            throw IOException("Unable to connect to the Network Map Service at $serverAddress for IP address discovery", e)
+        }
+
+        val session = clientFactory.createSession(PEER_USER, PEER_USER, false, true, true, locator.isPreAcknowledge, ActiveMQClient.DEFAULT_ACK_BATCH_SIZE)
+        val requestId = UUID.randomUUID().toString()
+        session.addMetaData(ipDetectRequestProperty, requestId)
+        session.start()
+
+        val queueName = "$IP_REQUEST_PREFIX$requestId"
+        session.createQueue(queueName, RoutingType.MULTICAST, queueName, false)
+
+        val consumer = session.createConsumer(queueName)
+        val artemisMessage: ClientMessage = consumer.receive(10.seconds.toMillis()) ?:
+                throw IOException("Did not receive a response from the Network Map Service at $serverAddress")
+        val publicHostAndPort = artemisMessage.getStringProperty(ipDetectResponseProperty)
+        log.info("Detected public address: $publicHostAndPort")
+
+        consumer.close()
+        session.deleteQueue(queueName)
+        clientFactory.close()
+
+        return publicHostAndPort.removePrefix("/").parseNetworkHostAndPort().host
     }
 
     override fun startMessagingService(rpcOps: RPCOps) {
         // Start up the embedded MQ server
         messageBroker?.apply {
-            runOnStop += Runnable { stop() }
+            runOnStop += this::stop
             start()
         }
 
         // Start up the MQ client.
-        val net = net as NodeMessagingClient
-        net.start(rpcOps, userService)
+        (network as NodeMessagingClient).start(rpcOps, userService)
     }
 
     /**
@@ -160,16 +257,9 @@ class Node(override val configuration: FullNodeConfiguration,
         return networkMapConnection.flatMap { super.registerWithNetworkMap() }
     }
 
-    override fun makeUniquenessProvider(type: ServiceType): UniquenessProvider {
-        return when (type) {
-            RaftValidatingNotaryService.type -> with(configuration) {
-                RaftUniquenessProvider(baseDirectory, notaryNodeAddress!!, notaryClusterAddresses, database, configuration)
-            }
-            BFTValidatingNotaryService.type -> with(configuration) {
-                BFTSmartUniquenessProvider(notaryNodeAddress!!, notaryClusterAddresses, database)
-            }
-            else -> PersistentUniquenessProvider()
-        }
+    override fun myAddresses(): List<NetworkHostAndPort> {
+        val address = network.myAddress as ArtemisMessagingComponent.ArtemisPeerAddress
+        return listOf(address.hostAndPort)
     }
 
     /**
@@ -194,6 +284,7 @@ class Node(override val configuration: FullNodeConfiguration,
                         "-tcpAllowOthers",
                         "-tcpDaemon",
                         "-key", "node", databaseName)
+                runOnStop += server::stop
                 val url = server.start().url
                 printBasicNodeInfo("Database connection url is", "jdbc:h2:$url/node")
             }
@@ -201,46 +292,55 @@ class Node(override val configuration: FullNodeConfiguration,
         super.initialiseDatabasePersistence(insideTransaction)
     }
 
-    override fun start(): Node {
-        alreadyRunningNodeCheck()
-        super.start()
-        // Only start the service API requests once the network map registration is complete
-        thread(name = "WebServer") {
-            networkMapRegistrationFuture.getOrThrow()
-            // Begin exporting our own metrics via JMX.
-            JmxReporter.
-                    forRegistry(services.monitoringService.metrics).
-                    inDomain("net.corda").
-                    createsObjectNamesWith { type, domain, name ->
-                        // Make the JMX hierarchy a bit better organised.
-                        val category = name.substringBefore('.')
-                        val subName = name.substringAfter('.', "")
-                        if (subName == "")
-                            ObjectName("$domain:name=$category")
-                        else
-                            ObjectName("$domain:type=$category,name=$subName")
-                    }.
-                    build().
-                    start()
-        }
+    val startupComplete: ListenableFuture<Unit> = SettableFuture.create()
 
-        shutdownThread = thread(start = false) {
+    override fun start() {
+        if (initialiseSerialization) {
+            initialiseSerialization()
+        }
+        super.start()
+
+        networkMapRegistrationFuture.thenMatch({
+            serverThread.execute {
+                // Begin exporting our own metrics via JMX. These can be monitored using any agent, e.g. Jolokia:
+                //
+                // https://jolokia.org/agent/jvm.html
+                JmxReporter.
+                        forRegistry(services.monitoringService.metrics).
+                        inDomain("net.corda").
+                        createsObjectNamesWith { _, domain, name ->
+                            // Make the JMX hierarchy a bit better organised.
+                            val category = name.substringBefore('.')
+                            val subName = name.substringAfter('.', "")
+                            if (subName == "")
+                                ObjectName("$domain:name=$category")
+                            else
+                                ObjectName("$domain:type=$category,name=$subName")
+                        }.
+                        build().
+                        start()
+
+                (startupComplete as SettableFuture<Unit>).set(Unit)
+            }
+        }, {})
+        shutdownHook = addShutdownHook {
             stop()
         }
-        Runtime.getRuntime().addShutdownHook(shutdownThread)
+    }
 
-        return this
+    private fun initialiseSerialization() {
+        SerializationDefaults.SERIALIZATION_FACTORY = SerializationFactoryImpl().apply {
+            registerScheme(KryoServerSerializationScheme())
+        }
+        SerializationDefaults.P2P_CONTEXT = KRYO_P2P_CONTEXT
+        SerializationDefaults.RPC_SERVER_CONTEXT = KRYO_RPC_SERVER_CONTEXT
+        SerializationDefaults.STORAGE_CONTEXT = KRYO_STORAGE_CONTEXT
+        SerializationDefaults.CHECKPOINT_CONTEXT = KRYO_CHECKPOINT_CONTEXT
     }
 
     /** Starts a blocking event loop for message dispatch. */
     fun run() {
-        (net as NodeMessagingClient).run()
-    }
-
-    // TODO: Do we really need setup?
-    override fun setup(): Node {
-        super.setup()
-        return this
+        (network as NodeMessagingClient).run(messageBroker!!.serverControl)
     }
 
     private var shutdown = false
@@ -250,12 +350,9 @@ class Node(override val configuration: FullNodeConfiguration,
         synchronized(this) {
             if (shutdown) return
             shutdown = true
-
             // Unregister shutdown hook to prevent any unnecessary second calls to stop
-            if ((shutdownThread != null) && (Thread.currentThread() != shutdownThread)) {
-                Runtime.getRuntime().removeShutdownHook(shutdownThread)
-                shutdownThread = null
-            }
+            shutdownHook?.cancel()
+            shutdownHook = null
         }
         printBasicNodeInfo("Shutting down ...")
 
@@ -264,48 +361,10 @@ class Node(override val configuration: FullNodeConfiguration,
         // In particular this prevents premature shutdown of the Database by AbstractNode whilst the serverThread is active
         super.stop()
 
-        nodeFileLock!!.release()
         log.info("Shutdown complete")
-    }
-
-    private fun alreadyRunningNodeCheck() {
-        // Write out our process ID (which may or may not resemble a UNIX process id - to us it's just a string) to a
-        // file that we'll do our best to delete on exit. But if we don't, it'll be overwritten next time. If it already
-        // exists, we try to take the file lock first before replacing it and if that fails it means we're being started
-        // twice with the same directory: that's a user error and we should bail out.
-        val pidPath = configuration.baseDirectory / "process-id"
-        val file = pidPath.toFile()
-        if (!file.exists()) {
-            file.createNewFile()
-        }
-        file.deleteOnExit()
-        val f = RandomAccessFile(file, "rw")
-        val l = f.channel.tryLock()
-        if (l == null) {
-            log.error("It appears there is already a node running with the specified data directory ${configuration.baseDirectory}")
-            log.error("Shut that other node down and try again. It may have process ID ${file.readText()}")
-            System.exit(1)
-        }
-
-        nodeFileLock = l
-        val ourProcessID: String = ManagementFactory.getRuntimeMXBean().name.split("@")[0]
-        f.setLength(0)
-        f.write(ourProcessID.toByteArray())
-    }
-
-    // Servlet filter to wrap API requests with a database transaction.
-    private class DatabaseTransactionFilter(val database: Database) : Filter {
-        override fun doFilter(request: ServletRequest, response: ServletResponse, chain: FilterChain) {
-            databaseTransaction(database) {
-                chain.doFilter(request, response)
-            }
-        }
-
-        override fun init(filterConfig: FilterConfig?) {}
-        override fun destroy() {}
     }
 }
 
 class ConfigurationException(message: String) : Exception(message)
 
-data class NetworkMapInfo(val address: HostAndPort, val legalName: String)
+data class NetworkMapInfo(val address: NetworkHostAndPort, val legalName: X500Name)

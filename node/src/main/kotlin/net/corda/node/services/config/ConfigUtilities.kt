@@ -1,28 +1,26 @@
-// TODO: Remove when configureTestSSL() is moved.
-@file:JvmName("ConfigUtilities")
-
 package net.corda.node.services.config
 
-import com.google.common.net.HostAndPort
 import com.typesafe.config.Config
 import com.typesafe.config.ConfigFactory
 import com.typesafe.config.ConfigParseOptions
 import com.typesafe.config.ConfigRenderOptions
-import net.corda.core.copyTo
-import net.corda.core.createDirectories
-import net.corda.core.crypto.X509Utilities
-import net.corda.core.div
-import net.corda.core.exists
+import net.corda.core.internal.copyTo
+import net.corda.core.internal.createDirectories
+import net.corda.core.crypto.*
+import net.corda.core.internal.div
+import net.corda.core.internal.exists
 import net.corda.core.utilities.loggerFor
-import java.net.URL
-import java.nio.file.Files
+import net.corda.node.utilities.*
+import net.corda.nodeapi.config.SSLConfiguration
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x509.GeneralName
+import org.bouncycastle.asn1.x509.GeneralSubtree
+import org.bouncycastle.asn1.x509.NameConstraints
 import java.nio.file.Path
-import java.nio.file.Paths
-import java.time.Instant
-import java.time.LocalDate
-import java.util.*
-import kotlin.reflect.KProperty
-import kotlin.reflect.jvm.javaType
+import java.security.KeyStore
+
+fun configOf(vararg pairs: Pair<String, Any?>): Config = ConfigFactory.parseMap(mapOf(*pairs))
+operator fun Config.plus(overrides: Map<String, Any?>): Config = ConfigFactory.parseMap(overrides).withFallback(this)
 
 object ConfigHelper {
     private val log = loggerFor<ConfigHelper>()
@@ -30,67 +28,19 @@ object ConfigHelper {
     fun loadConfig(baseDirectory: Path,
                    configFile: Path = baseDirectory / "node.conf",
                    allowMissingConfig: Boolean = false,
-                   configOverrides: Map<String, Any?> = emptyMap()): Config {
+                   configOverrides: Config = ConfigFactory.empty()): Config {
         val parseOptions = ConfigParseOptions.defaults()
         val defaultConfig = ConfigFactory.parseResources("reference.conf", parseOptions.setAllowMissing(false))
         val appConfig = ConfigFactory.parseFile(configFile.toFile(), parseOptions.setAllowMissing(allowMissingConfig))
-        val overrideConfig = ConfigFactory.parseMap(configOverrides + mapOf(
+        val finalConfig = configOf(
                 // Add substitution values here
                 "basedir" to baseDirectory.toString())
-        )
-        val finalConfig = overrideConfig
+                .withFallback(configOverrides)
                 .withFallback(appConfig)
                 .withFallback(defaultConfig)
                 .resolve()
         log.info("Config:\n${finalConfig.root().render(ConfigRenderOptions.defaults())}")
         return finalConfig
-    }
-}
-
-@Suppress("UNCHECKED_CAST")
-operator fun <T> Config.getValue(receiver: Any, metadata: KProperty<*>): T {
-    return when (metadata.returnType.javaType) {
-        String::class.java -> getString(metadata.name) as T
-        Int::class.java -> getInt(metadata.name) as T
-        Long::class.java -> getLong(metadata.name) as T
-        Double::class.java -> getDouble(metadata.name) as T
-        Boolean::class.java -> getBoolean(metadata.name) as T
-        LocalDate::class.java -> LocalDate.parse(getString(metadata.name)) as T
-        Instant::class.java -> Instant.parse(getString(metadata.name)) as T
-        HostAndPort::class.java -> HostAndPort.fromString(getString(metadata.name)) as T
-        Path::class.java -> Paths.get(getString(metadata.name)) as T
-        URL::class.java -> URL(getString(metadata.name)) as T
-        Properties::class.java -> getProperties(metadata.name) as T
-        else -> throw IllegalArgumentException("Unsupported type ${metadata.returnType}")
-    }
-}
-
-/**
- * Helper class for optional configurations
- */
-class OptionalConfig<out T>(val conf: Config, val lambda: () -> T) {
-    operator fun getValue(receiver: Any, metadata: KProperty<*>): T {
-        return if (conf.hasPath(metadata.name)) conf.getValue(receiver, metadata) else lambda()
-    }
-}
-
-fun <T> Config.getOrElse(lambda: () -> T): OptionalConfig<T> = OptionalConfig(this, lambda)
-
-fun Config.getProperties(path: String): Properties {
-    val obj = this.getObject(path)
-    val props = Properties()
-    for ((property, objectValue) in obj.entries) {
-        props.setProperty(property, objectValue.unwrapped().toString())
-    }
-    return props
-}
-
-@Suppress("UNCHECKED_CAST")
-inline fun <reified T : Any> Config.getListOrElse(path: String, default: Config.() -> List<T>): List<T> {
-    return if (hasPath(path)) {
-        (if (T::class == String::class) getStringList(path) else getConfigList(path)) as List<T>
-    } else {
-        this.default()
     }
 }
 
@@ -100,27 +50,62 @@ inline fun <reified T : Any> Config.getListOrElse(path: String, default: Config.
  */
 fun NodeConfiguration.configureWithDevSSLCertificate() = configureDevKeyAndTrustStores(myLegalName)
 
-private fun SSLConfiguration.configureDevKeyAndTrustStores(myLegalName: String) {
+fun SSLConfiguration.configureDevKeyAndTrustStores(myLegalName: X500Name) {
     certificatesDirectory.createDirectories()
     if (!trustStoreFile.exists()) {
         javaClass.classLoader.getResourceAsStream("net/corda/node/internal/certificates/cordatruststore.jks").copyTo(trustStoreFile)
     }
-    if (!keyStoreFile.exists()) {
-        val caKeyStore = X509Utilities.loadKeyStore(
-                javaClass.classLoader.getResourceAsStream("net/corda/node/internal/certificates/cordadevcakeys.jks"),
-                "cordacadevpass")
-        X509Utilities.createKeystoreForSSL(keyStoreFile, keyStorePassword, keyStorePassword, caKeyStore, "cordacadevkeypass", myLegalName)
+    if (!sslKeystore.exists() || !nodeKeystore.exists()) {
+        val caKeyStore = loadKeyStore(javaClass.classLoader.getResourceAsStream("net/corda/node/internal/certificates/cordadevcakeys.jks"), "cordacadevpass")
+        createKeystoreForCordaNode(sslKeystore, nodeKeystore, keyStorePassword, keyStorePassword, caKeyStore, "cordacadevkeypass", myLegalName)
     }
 }
 
-// TODO Move this to CoreTestUtils.kt once we can pry this from the explorer
-@JvmOverloads
-fun configureTestSSL(legalName: String = "Mega Corp."): SSLConfiguration = object : SSLConfiguration {
-    override val certificatesDirectory = Files.createTempDirectory("certs")
-    override val keyStorePassword: String get() = "cordacadevpass"
-    override val trustStorePassword: String get() = "trustpass"
+/**
+ * An all in wrapper to manufacture a server certificate and keys all stored in a KeyStore suitable for running TLS on the local machine.
+ * @param sslKeyStorePath KeyStore path to save ssl key and cert to.
+ * @param clientCAKeystorePath KeyStore path to save client CA key and cert to.
+ * @param storePassword access password for KeyStore.
+ * @param keyPassword PrivateKey access password for the generated keys.
+ * It is recommended that this is the same as the storePassword as most TLS libraries assume they are the same.
+ * @param caKeyStore KeyStore containing CA keys generated by createCAKeyStoreAndTrustStore.
+ * @param caKeyPassword password to unlock private keys in the CA KeyStore.
+ * @return The KeyStore created containing a private key, certificate chain and root CA public cert for use in TLS applications.
+ */
+fun createKeystoreForCordaNode(sslKeyStorePath: Path,
+                               clientCAKeystorePath: Path,
+                               storePassword: String,
+                               keyPassword: String,
+                               caKeyStore: KeyStore,
+                               caKeyPassword: String,
+                               legalName: X500Name,
+                               signatureScheme: SignatureScheme = X509Utilities.DEFAULT_TLS_SIGNATURE_SCHEME) {
 
-    init {
-        configureDevKeyAndTrustStores(legalName)
-    }
+    val rootCACert = caKeyStore.getX509Certificate(X509Utilities.CORDA_ROOT_CA)
+    val (intermediateCACert, intermediateCAKeyPair) = caKeyStore.getCertificateAndKeyPair(X509Utilities.CORDA_INTERMEDIATE_CA, caKeyPassword)
+
+    val clientKey = Crypto.generateKeyPair(signatureScheme)
+    val nameConstraints = NameConstraints(arrayOf(GeneralSubtree(GeneralName(GeneralName.directoryName, legalName))), arrayOf())
+    val clientCACert = X509Utilities.createCertificate(CertificateType.INTERMEDIATE_CA, intermediateCACert, intermediateCAKeyPair, legalName, clientKey.public, nameConstraints = nameConstraints)
+
+    val tlsKey = Crypto.generateKeyPair(signatureScheme)
+    val clientTLSCert = X509Utilities.createCertificate(CertificateType.TLS, clientCACert, clientKey, legalName, tlsKey.public)
+
+    val keyPass = keyPassword.toCharArray()
+
+    val clientCAKeystore = loadOrCreateKeyStore(clientCAKeystorePath, storePassword)
+    clientCAKeystore.addOrReplaceKey(
+            X509Utilities.CORDA_CLIENT_CA,
+            clientKey.private,
+            keyPass,
+            arrayOf(clientCACert, intermediateCACert, rootCACert))
+    clientCAKeystore.save(clientCAKeystorePath, storePassword)
+
+    val tlsKeystore = loadOrCreateKeyStore(sslKeyStorePath, storePassword)
+    tlsKeystore.addOrReplaceKey(
+            X509Utilities.CORDA_CLIENT_TLS,
+            tlsKey.private,
+            keyPass,
+            arrayOf(clientTLSCert, clientCACert, intermediateCACert, rootCACert))
+    tlsKeystore.save(sslKeyStorePath, storePassword)
 }

@@ -1,9 +1,12 @@
 package net.corda.vega.flows
 
 import co.paralleluniverse.fibers.Suspendable
-import net.corda.core.crypto.Party
 import net.corda.core.flows.FlowLogic
-import net.corda.core.node.PluginServiceHub
+import net.corda.core.flows.InitiatedBy
+import net.corda.core.flows.InitiatingFlow
+import net.corda.core.flows.StartableByRPC
+import net.corda.core.identity.Party
+import net.corda.core.serialization.CordaSerializable
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.utilities.unwrap
 import net.corda.flows.TwoPartyDealFlow
@@ -12,10 +15,12 @@ import net.corda.vega.contracts.OGTrade
 import net.corda.vega.contracts.SwapData
 
 object IRSTradeFlow {
+    @CordaSerializable
     data class OfferMessage(val notary: Party, val dealBeingOffered: IRSState)
 
+    @InitiatingFlow
+    @StartableByRPC
     class Requester(val swap: SwapData, val otherParty: Party) : FlowLogic<SignedTransaction>() {
-
         @Suspendable
         override fun call(): SignedTransaction {
             require(serviceHub.networkMapCache.notaryNodes.isNotEmpty()) { "No notary nodes registered" }
@@ -27,7 +32,7 @@ object IRSTradeFlow {
                     } else {
                         Pair(otherParty, myIdentity)
                     }
-            val offer = IRSState(swap, buyer.toAnonymous(), seller.toAnonymous(), OGTrade())
+            val offer = IRSState(swap, buyer, seller, OGTrade())
 
             logger.info("Handshake finished, sending IRS trade offer message")
             val otherPartyAgreeFlag = sendAndReceive<Boolean>(otherParty, OfferMessage(notary, offer)).unwrap { it }
@@ -36,18 +41,13 @@ object IRSTradeFlow {
             return subFlow(TwoPartyDealFlow.Instigator(
                     otherParty,
                     TwoPartyDealFlow.AutoOffer(notary, offer),
-                    serviceHub.legalIdentityKey), shareParentSessions = true)
+                    serviceHub.legalIdentityKey))
         }
+
     }
 
-    class Service(services: PluginServiceHub) {
-        init {
-            services.registerFlowInitiator(Requester::class, ::Receiver)
-        }
-    }
-
+    @InitiatedBy(Requester::class)
     class Receiver(private val replyToParty: Party) : FlowLogic<Unit>() {
-
         @Suspendable
         override fun call() {
             logger.info("IRSTradeFlow receiver started")
@@ -57,7 +57,7 @@ object IRSTradeFlow {
             // Automatically agree - in reality we'd vet the offer message
             require(serviceHub.networkMapCache.notaryNodes.map { it.notaryIdentity }.contains(offer.notary))
             send(replyToParty, true)
-            subFlow(TwoPartyDealFlow.Acceptor(replyToParty), shareParentSessions = true)
+            subFlow(TwoPartyDealFlow.Acceptor(replyToParty))
         }
     }
 }

@@ -1,53 +1,62 @@
 package net.corda.core.node
 
-import com.esotericsoftware.kryo.Kryo
 import net.corda.core.messaging.CordaRPCOps
+import net.corda.core.schemas.MappedSchema
+import net.corda.core.serialization.SerializationCustomization
 import java.util.function.Function
+import net.corda.core.schemas.QueryableState
+import net.corda.core.contracts.ContractState
+import net.corda.core.node.services.VaultQueryService
 
 /**
  * Implement this interface on a class advertised in a META-INF/services/net.corda.core.node.CordaPluginRegistry file
  * to extend a Corda node with additional application services.
  */
-abstract class CordaPluginRegistry(
-        /**
-         * List of lambdas returning JAX-RS objects. They may only depend on the RPC interface, as the webserver should
-         * potentially be able to live in a process separate from the node itself.
-         */
-        open val webApis: List<Function<CordaRPCOps, out Any>> = emptyList(),
+abstract class CordaPluginRegistry {
 
-        /**
-         * Map of static serving endpoints to the matching resource directory. All endpoints will be prefixed with "/web" and postfixed with "\*.
-         * Resource directories can be either on disk directories (especially when debugging) in the form "a/b/c". Serving from a JAR can
-         *  be specified with: javaClass.getResource("<folder-in-jar>").toExternalForm()
-         */
-        open val staticServeDirs: Map<String, String> = emptyMap(),
+    @Suppress("unused")
+    @Deprecated("This is no longer in use, moved to WebServerPluginRegistry class in webserver module",
+            level = DeprecationLevel.ERROR, replaceWith = ReplaceWith("net.corda.webserver.services.WebServerPluginRegistry"))
+    open val webApis: List<Function<CordaRPCOps, out Any>> get() = emptyList()
 
-        /**
-         * A Map with an entry for each consumed Flow used by the webAPIs.
-         * The key of each map entry should contain the FlowLogic<T> class name.
-         * The associated map values are the union of all concrete class names passed to the Flow constructor.
-         * Standard java.lang.* and kotlin.* types do not need to be included explicitly.
-         * This is used to extend the white listed Flows that can be initiated from the ServiceHub invokeFlowAsync method.
-         */
-        open val requiredFlows: Map<String, Set<String>> = emptyMap(),
 
-        /**
-         * List of lambdas constructing additional long lived services to be hosted within the node.
-         * They expect a single [PluginServiceHub] parameter as input.
-         * The [PluginServiceHub] will be fully constructed before the plugin service is created and will
-         * allow access to the Flow factory and Flow initiation entry points there.
-         */
-        open val servicePlugins: List<Function<PluginServiceHub, out Any>> = emptyList()
-) {
-        /**
-         * Optionally register types with [Kryo] for use over RPC, as we lock down the types that can be serialised in this
-         * particular use case.
-         * For example, if you add an RPC interface that carries some contract states back and forth, you need to register
-         * those classes here using the [register] method on Kryo.
-         *
-         * TODO: Kryo and likely the requirement to register classes here will go away when we replace the serialization implementation.
-         *
-         * @return true if you register types, otherwise you will be filtered out of the list of plugins considered in future.
-         */
-        open fun registerRPCKryoTypes(kryo: Kryo): Boolean = false
+    @Suppress("unused")
+    @Deprecated("This is no longer in use, moved to WebServerPluginRegistry class in webserver module",
+            level = DeprecationLevel.ERROR, replaceWith = ReplaceWith("net.corda.webserver.services.WebServerPluginRegistry"))
+    open val staticServeDirs: Map<String, String> get() = emptyMap()
+
+    @Suppress("unused")
+    @Deprecated("This is no longer needed. Instead annotate any flows that need to be invoked via RPC with " +
+            "@StartableByRPC and any scheduled flows with @SchedulableFlow", level = DeprecationLevel.ERROR)
+    open val requiredFlows: Map<String, Set<String>> get() = emptyMap()
+
+    /**
+     * List of lambdas constructing additional long lived services to be hosted within the node.
+     * They expect a single [PluginServiceHub] parameter as input.
+     * The [PluginServiceHub] will be fully constructed before the plugin service is created and will
+     * allow access to the Flow factory and Flow initiation entry points there.
+     */
+    @Suppress("unused")
+    @Deprecated("This is no longer used. If you need to create your own service, such as an oracle, then use the " +
+        "@CordaService annotation. For flow registrations use @InitiatedBy.", level = DeprecationLevel.ERROR)
+    open val servicePlugins: List<Function<PluginServiceHub, out Any>> get() = emptyList()
+
+    /**
+     * Optionally whitelist types for use in object serialization, as we lock down the types that can be serialized.
+     *
+     * For example, if you add a new [net.corda.core.contracts.ContractState] it needs to be whitelisted.  You can do that
+     * either by adding the [net.corda.core.serialization.CordaSerializable] annotation or via this method.
+     **
+     * @return true if you register types, otherwise you will be filtered out of the list of plugins considered in future.
+     */
+    open fun customizeSerialization(custom: SerializationCustomization): Boolean = false
+
+    /**
+     * Optionally, custom schemas to be used for contract state persistence and vault custom querying
+     *
+     * For example, if you implement the [QueryableState] interface on a new [ContractState]
+     * it needs to be registered here if you wish to perform custom queries on schema entity attributes using the
+     * [VaultQueryService] API
+     */
+    open val requiredSchemas: Set<MappedSchema> get() = emptySet()
 }

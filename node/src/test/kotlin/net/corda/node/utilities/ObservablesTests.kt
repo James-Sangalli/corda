@@ -1,12 +1,11 @@
 package net.corda.node.utilities
 
 import com.google.common.util.concurrent.SettableFuture
-import net.corda.core.bufferUntilSubscribed
-import net.corda.core.tee
+import net.corda.core.internal.bufferUntilSubscribed
+import net.corda.core.internal.tee
 import net.corda.testing.node.makeTestDataSourceProperties
+import net.corda.testing.node.makeTestDatabaseProperties
 import org.assertj.core.api.Assertions.assertThat
-import org.jetbrains.exposed.sql.Database
-import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.junit.After
 import org.junit.Test
 import rx.Observable
@@ -16,13 +15,13 @@ import java.util.*
 
 class ObservablesTests {
 
-    private fun isInDatabaseTransaction(): Boolean = (TransactionManager.currentOrNull() != null)
+    private fun isInDatabaseTransaction(): Boolean = (DatabaseTransactionManager.currentOrNull() != null)
 
     val toBeClosed = mutableListOf<Closeable>()
 
-    fun createDatabase(): Database {
-        val (closeable, database) = configureDatabase(makeTestDataSourceProperties())
-        toBeClosed += closeable
+    fun createDatabase(): CordaPersistence {
+        val database = configureDatabase(makeTestDataSourceProperties(), makeTestDatabaseProperties())
+        toBeClosed += database
         return database
     }
 
@@ -45,7 +44,7 @@ class ObservablesTests {
         observable.first().subscribe { firstEvent.set(it to isInDatabaseTransaction()) }
         observable.skip(1).first().subscribe { secondEvent.set(it to isInDatabaseTransaction()) }
 
-        databaseTransaction(database) {
+        database.transaction {
             val delayedSubject = source.bufferUntilDatabaseCommit()
             assertThat(source).isNotEqualTo(delayedSubject)
             delayedSubject.onNext(0)
@@ -72,7 +71,7 @@ class ObservablesTests {
         observable.first().subscribe { firstEvent.set(it to isInDatabaseTransaction()) }
         observable.skip(1).first().subscribe { secondEvent.set(it to isInDatabaseTransaction()) }
 
-        databaseTransaction(database) {
+        database.transaction {
             val delayedSubject = source.bufferUntilDatabaseCommit()
             assertThat(source).isNotEqualTo(delayedSubject)
             delayedSubject.onNext(0)
@@ -83,7 +82,7 @@ class ObservablesTests {
         assertThat(firstEvent.get()).isEqualTo(0 to false)
         assertThat(secondEvent.isDone).isFalse()
 
-        databaseTransaction(database) {
+        database.transaction {
             val delayedSubject = source.bufferUntilDatabaseCommit()
             assertThat(source).isNotEqualTo(delayedSubject)
             delayedSubject.onNext(1)
@@ -140,7 +139,7 @@ class ObservablesTests {
 
         teed.first().subscribe { teedEvent.set(it to isInDatabaseTransaction()) }
 
-        databaseTransaction(database) {
+        database.transaction {
             val delayedSubject = source.bufferUntilDatabaseCommit().tee(teed)
             assertThat(source).isNotEqualTo(delayedSubject)
             delayedSubject.onNext(0)
@@ -167,13 +166,13 @@ class ObservablesTests {
         observableWithDbTx.first().subscribe { undelayedEvent.set(it to isInDatabaseTransaction()) }
 
         fun observeSecondEvent(event: Int, future: SettableFuture<Pair<Int, UUID?>>) {
-            future.set(event to if (isInDatabaseTransaction()) StrandLocalTransactionManager.transactionId else null)
+            future.set(event to if (isInDatabaseTransaction()) DatabaseTransactionManager.transactionId else null)
         }
 
         observableWithDbTx.skip(1).first().subscribe { observeSecondEvent(it, delayedEventFromSecondObserver) }
         observableWithDbTx.skip(1).first().subscribe { observeSecondEvent(it, delayedEventFromThirdObserver) }
 
-        databaseTransaction(database) {
+        database.transaction {
             val commitDelayedSource = source.bufferUntilDatabaseCommit()
             assertThat(source).isNotEqualTo(commitDelayedSource)
             commitDelayedSource.onNext(0)
@@ -236,5 +235,37 @@ class ObservablesTests {
 
         subscription2.unsubscribe()
         assertThat(unsubscribed).isTrue()
+    }
+
+    @Test
+    fun `check wrapping in db tx restarts if we pass through zero subscribers`() {
+        val database = createDatabase()
+
+        val source = PublishSubject.create<Int>()
+        var unsubscribed = false
+
+        val bufferedObservable: Observable<Int> = source.doOnUnsubscribe { unsubscribed = true }
+        val databaseWrappedObservable: Observable<Int> = bufferedObservable.wrapWithDatabaseTransaction(database)
+
+        assertThat(unsubscribed).isFalse()
+
+        val subscription1 = databaseWrappedObservable.subscribe { }
+        val subscription2 = databaseWrappedObservable.subscribe { }
+
+        subscription1.unsubscribe()
+        assertThat(unsubscribed).isFalse()
+
+        subscription2.unsubscribe()
+        assertThat(unsubscribed).isTrue()
+
+        val event = SettableFuture.create<Int>()
+        val subscription3 = databaseWrappedObservable.subscribe { event.set(it) }
+
+        source.onNext(1)
+
+        assertThat(event.isDone).isTrue()
+        assertThat(event.get()).isEqualTo(1)
+
+        subscription3.unsubscribe()
     }
 }

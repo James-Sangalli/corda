@@ -1,5 +1,6 @@
 package net.corda.irs.api
 
+import net.corda.client.rpc.notUsed
 import net.corda.core.contracts.filterStatesOfType
 import net.corda.core.getOrThrow
 import net.corda.core.messaging.CordaRPCOps
@@ -7,12 +8,7 @@ import net.corda.core.messaging.startFlow
 import net.corda.core.utilities.loggerFor
 import net.corda.irs.contract.InterestRateSwap
 import net.corda.irs.flows.AutoOfferFlow
-import net.corda.irs.flows.ExitServerFlow
-import net.corda.irs.flows.UpdateBusinessDayFlow
 import java.net.URI
-import java.time.LocalDate
-import java.time.LocalDateTime
-import java.time.ZoneId
 import javax.ws.rs.*
 import javax.ws.rs.core.MediaType
 import javax.ws.rs.core.Response
@@ -28,14 +24,9 @@ import javax.ws.rs.core.Response
  *
  * TODO: where we currently refer to singular external deal reference, of course this could easily be multiple identifiers e.g. CUSIP, ISIN.
  *
- * GET /api/irs/demodate - return the current date as viewed by the system in YYYY-MM-DD format.
- * PUT /api/irs/demodate - put date in format YYYY-MM-DD to advance the current date as viewed by the system and
  * simulate any associated business processing (currently fixing).
  *
  * TODO: replace simulated date advancement with business event based implementation
- *
- * PUT /api/irs/restart - (empty payload) cause the node to restart for API user emergency use in case any servers become unresponsive,
- * or if the demodate or population of deals should be reset (will only work while persistence is disabled).
  */
 @Path("irs")
 class InterestRateSwapAPI(val rpc: CordaRPCOps) {
@@ -45,7 +36,9 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
     private fun generateDealLink(deal: InterestRateSwap.State) = "/api/irs/deals/" + deal.common.tradeID
 
     private fun getDealByRef(ref: String): InterestRateSwap.State? {
-        val states = rpc.vaultAndUpdates().first.filterStatesOfType<InterestRateSwap.State>().filter { it.state.data.ref == ref }
+        val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+        vaultUpdates.notUsed()
+        val states = vault.filterStatesOfType<InterestRateSwap.State>().filter { it.state.data.ref == ref }
         return if (states.isEmpty()) null else {
             val deals = states.map { it.state.data }
             return if (deals.isEmpty()) null else deals[0]
@@ -53,7 +46,9 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
     }
 
     private fun getAllDeals(): Array<InterestRateSwap.State> {
-        val states = rpc.vaultAndUpdates().first.filterStatesOfType<InterestRateSwap.State>()
+        val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+        vaultUpdates.notUsed()
+        val states = vault.filterStatesOfType<InterestRateSwap.State>()
         val swaps = states.map { it.state.data }.toTypedArray()
         return swaps
     }
@@ -86,35 +81,5 @@ class InterestRateSwapAPI(val rpc: CordaRPCOps) {
         } else {
             return Response.ok().entity(deal).build()
         }
-    }
-
-    @PUT
-    @Path("demodate")
-    @Consumes(MediaType.APPLICATION_JSON)
-    fun storeDemoDate(newDemoDate: LocalDate): Response {
-        val priorDemoDate = fetchDemoDate()
-        // Can only move date forwards
-        if (newDemoDate.isAfter(priorDemoDate)) {
-            rpc.startFlow(UpdateBusinessDayFlow::Broadcast, newDemoDate).returnValue.getOrThrow()
-            return Response.ok().build()
-        }
-        val msg = "demodate is already $priorDemoDate and can only be updated with a later date"
-        logger.error("Attempt to set demodate to $newDemoDate but $msg")
-        return Response.status(Response.Status.CONFLICT).entity(msg).build()
-    }
-
-    @GET
-    @Path("demodate")
-    @Produces(MediaType.APPLICATION_JSON)
-    fun fetchDemoDate(): LocalDate {
-        return LocalDateTime.ofInstant(rpc.currentNodeTime(), ZoneId.systemDefault()).toLocalDate()
-    }
-
-    @PUT
-    @Path("restart")
-    @Consumes(MediaType.APPLICATION_JSON)
-    fun exitServer(): Response {
-        rpc.startFlow(ExitServerFlow::Broadcast, 83).returnValue.getOrThrow()
-        return Response.ok().build()
     }
 }

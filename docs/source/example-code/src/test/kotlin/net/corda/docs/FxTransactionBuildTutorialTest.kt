@@ -1,17 +1,16 @@
 package net.corda.docs
 
+import net.corda.contracts.getCashBalances
 import net.corda.core.contracts.*
 import net.corda.core.getOrThrow
 import net.corda.core.node.services.ServiceInfo
-import net.corda.core.serialization.OpaqueBytes
 import net.corda.core.toFuture
-import net.corda.core.utilities.DUMMY_NOTARY
-import net.corda.core.utilities.DUMMY_NOTARY_KEY
+import net.corda.core.utilities.OpaqueBytes
 import net.corda.flows.CashIssueFlow
-import net.corda.flows.CashPaymentFlow
 import net.corda.node.services.network.NetworkMapService
 import net.corda.node.services.transactions.ValidatingNotaryService
-import net.corda.node.utilities.databaseTransaction
+import net.corda.testing.DUMMY_NOTARY
+import net.corda.testing.DUMMY_NOTARY_KEY
 import net.corda.testing.node.MockNetwork
 import org.junit.After
 import org.junit.Before
@@ -19,31 +18,28 @@ import org.junit.Test
 import kotlin.test.assertEquals
 
 class FxTransactionBuildTutorialTest {
-    lateinit var net: MockNetwork
+    lateinit var mockNet: MockNetwork
     lateinit var notaryNode: MockNetwork.MockNode
     lateinit var nodeA: MockNetwork.MockNode
     lateinit var nodeB: MockNetwork.MockNode
 
     @Before
     fun setup() {
-        net = MockNetwork(threadPerNode = true)
+        mockNet = MockNetwork(threadPerNode = true)
         val notaryService = ServiceInfo(ValidatingNotaryService.type)
-        notaryNode = net.createNode(
+        notaryNode = mockNet.createNode(
                 legalName = DUMMY_NOTARY.name,
-                overrideServices = mapOf(Pair(notaryService, DUMMY_NOTARY_KEY)),
+                overrideServices = mapOf(notaryService to DUMMY_NOTARY_KEY),
                 advertisedServices = *arrayOf(ServiceInfo(NetworkMapService.type), notaryService))
-        nodeA = net.createPartyNode(notaryNode.info.address)
-        nodeB = net.createPartyNode(notaryNode.info.address)
-        FxTransactionDemoTutorial.registerFxProtocols(nodeA.services)
-        FxTransactionDemoTutorial.registerFxProtocols(nodeB.services)
-        WorkflowTransactionBuildTutorial.registerWorkflowProtocols(nodeA.services)
-        WorkflowTransactionBuildTutorial.registerWorkflowProtocols(nodeB.services)
+        nodeA = mockNet.createPartyNode(notaryNode.network.myAddress)
+        nodeB = mockNet.createPartyNode(notaryNode.network.myAddress)
+        nodeB.registerInitiatedFlow(ForeignExchangeRemoteFlow::class.java)
     }
 
     @After
     fun cleanUp() {
         println("Close DB")
-        net.stopNodes()
+        mockNet.stopNodes()
     }
 
     @Test
@@ -52,7 +48,8 @@ class FxTransactionBuildTutorialTest {
         val flowHandle1 = nodeA.services.startFlow(CashIssueFlow(DOLLARS(1000),
                 OpaqueBytes.of(0x01),
                 nodeA.info.legalIdentity,
-                notaryNode.info.notaryIdentity))
+                notaryNode.info.notaryIdentity,
+                false))
         // Wait for the flow to stop and print
         flowHandle1.resultFuture.getOrThrow()
         printBalances()
@@ -61,7 +58,8 @@ class FxTransactionBuildTutorialTest {
         val flowHandle2 = nodeB.services.startFlow(CashIssueFlow(POUNDS(1000),
                 OpaqueBytes.of(0x01),
                 nodeB.info.legalIdentity,
-                notaryNode.info.notaryIdentity))
+                notaryNode.info.notaryIdentity,
+                false))
         // Wait for flow to come to an end and print
         flowHandle2.resultFuture.getOrThrow()
         printBalances()
@@ -80,12 +78,12 @@ class FxTransactionBuildTutorialTest {
         doIt.resultFuture.getOrThrow()
         // Get the balances when the vault updates
         nodeAVaultUpdate.get()
-        val balancesA = databaseTransaction(nodeA.database) {
-            nodeA.services.vaultService.cashBalances
+        val balancesA = nodeA.database.transaction {
+            nodeA.services.getCashBalances()
         }
         nodeBVaultUpdate.get()
-        val balancesB = databaseTransaction(nodeB.database) {
-            nodeB.services.vaultService.cashBalances
+        val balancesB = nodeB.database.transaction {
+            nodeB.services.getCashBalances()
         }
         println("BalanceA\n" + balancesA)
         println("BalanceB\n" + balancesB)
@@ -98,11 +96,11 @@ class FxTransactionBuildTutorialTest {
 
     private fun printBalances() {
         // Print out the balances
-        databaseTransaction(nodeA.database) {
-            println("BalanceA\n" + nodeA.services.vaultService.cashBalances)
+        nodeA.database.transaction {
+            println("BalanceA\n" + nodeA.services.getCashBalances())
         }
-        databaseTransaction(nodeB.database) {
-            println("BalanceB\n" + nodeB.services.vaultService.cashBalances)
+        nodeB.database.transaction {
+            println("BalanceB\n" + nodeB.services.getCashBalances())
         }
     }
 }

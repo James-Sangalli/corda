@@ -1,9 +1,16 @@
 package net.corda.node.services.keys
 
-import net.corda.core.ThreadBox
+import net.corda.core.internal.ThreadBox
+import net.corda.core.crypto.DigitalSignature
 import net.corda.core.crypto.generateKeyPair
+import net.corda.core.crypto.keys
+import net.corda.core.crypto.sign
+import net.corda.core.identity.AnonymousPartyAndPath
+import net.corda.core.identity.PartyAndCertificate
+import net.corda.core.node.services.IdentityService
 import net.corda.core.node.services.KeyManagementService
 import net.corda.core.serialization.SingletonSerializeAsToken
+import org.bouncycastle.operator.ContentSigner
 import java.security.KeyPair
 import java.security.PrivateKey
 import java.security.PublicKey
@@ -22,7 +29,8 @@ import javax.annotation.concurrent.ThreadSafe
  * etc.
  */
 @ThreadSafe
-class E2ETestKeyManagementService(initialKeys: Set<KeyPair>) : SingletonSerializeAsToken(), KeyManagementService {
+class E2ETestKeyManagementService(val identityService: IdentityService,
+                                  initialKeys: Set<KeyPair>) : SingletonSerializeAsToken(), KeyManagementService {
     private class InnerState {
         val keys = HashMap<PublicKey, PrivateKey>()
     }
@@ -38,13 +46,36 @@ class E2ETestKeyManagementService(initialKeys: Set<KeyPair>) : SingletonSerializ
     }
 
     // Accessing this map clones it.
-    override val keys: Map<PublicKey, PrivateKey> get() = mutex.locked { HashMap(keys) }
+    override val keys: Set<PublicKey> get() = mutex.locked { keys.keys }
 
-    override fun freshKey(): KeyPair {
+    override fun freshKey(): PublicKey {
         val keyPair = generateKeyPair()
         mutex.locked {
             keys[keyPair.public] = keyPair.private
         }
-        return keyPair
+        return keyPair.public
+    }
+
+    override fun freshKeyAndCert(identity: PartyAndCertificate, revocationEnabled: Boolean): AnonymousPartyAndPath {
+        return freshCertificate(identityService, freshKey(), identity, getSigner(identity.owningKey), revocationEnabled)
+    }
+
+    private fun getSigner(publicKey: PublicKey): ContentSigner = getSigner(getSigningKeyPair(publicKey))
+
+    private fun getSigningKeyPair(publicKey: PublicKey): KeyPair {
+        return mutex.locked {
+            val pk = publicKey.keys.first { keys.containsKey(it) }
+            KeyPair(pk, keys[pk]!!)
+        }
+    }
+
+    override fun filterMyKeys(candidateKeys: Iterable<PublicKey>): Iterable<PublicKey> {
+        return mutex.locked { candidateKeys.filter { it in this.keys } }
+    }
+
+    override fun sign(bytes: ByteArray, publicKey: PublicKey): DigitalSignature.WithKey {
+        val keyPair = getSigningKeyPair(publicKey)
+        val signature = keyPair.sign(bytes)
+        return signature
     }
 }

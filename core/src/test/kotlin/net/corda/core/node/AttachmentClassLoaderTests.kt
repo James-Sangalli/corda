@@ -1,26 +1,33 @@
 package net.corda.core.node
 
+import com.nhaarman.mockito_kotlin.mock
+import com.nhaarman.mockito_kotlin.whenever
 import net.corda.core.contracts.*
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
 import net.corda.core.node.services.AttachmentStorage
 import net.corda.core.serialization.*
+import net.corda.core.serialization.SerializationDefaults.P2P_CONTEXT
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.transactions.TransactionBuilder
-import net.corda.core.utilities.DUMMY_NOTARY
+import net.corda.testing.DUMMY_NOTARY
 import net.corda.testing.MEGA_CORP
+import net.corda.testing.TestDependencyInjectionBase
 import net.corda.testing.node.MockAttachmentStorage
 import org.apache.commons.io.IOUtils
 import org.junit.Assert
 import org.junit.Test
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.net.URL
 import java.net.URLClassLoader
 import java.util.jar.JarOutputStream
 import java.util.zip.ZipEntry
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 interface DummyContractBackdoor {
     fun generateInitial(owner: PartyAndReference, magicNumber: Int, notary: Party): TransactionBuilder
@@ -29,15 +36,21 @@ interface DummyContractBackdoor {
 
 val ATTACHMENT_TEST_PROGRAM_ID = AttachmentClassLoaderTests.AttachmentDummyContract()
 
-class AttachmentClassLoaderTests {
+class AttachmentClassLoaderTests : TestDependencyInjectionBase() {
     companion object {
-        val ISOLATED_CONTRACTS_JAR_PATH = AttachmentClassLoaderTests::class.java.getResource("isolated.jar")
+        val ISOLATED_CONTRACTS_JAR_PATH: URL = AttachmentClassLoaderTests::class.java.getResource("isolated.jar")
+
+        private fun SerializationContext.withAttachmentStorage(attachmentStorage: AttachmentStorage): SerializationContext {
+            val serviceHub = mock<ServiceHub>()
+            whenever(serviceHub.attachments).thenReturn(attachmentStorage)
+            return this.withTokenContext(SerializeAsTokenContext(serviceHub) {}).withProperty(WireTransactionSerializer.attachmentsClassLoaderEnabled, true)
+        }
     }
 
     class AttachmentDummyContract : Contract {
         data class State(val magicNumber: Int = 0) : ContractState {
             override val contract = ATTACHMENT_TEST_PROGRAM_ID
-            override val participants: List<CompositeKey>
+            override val participants: List<AbstractParty>
                 get() = listOf()
         }
 
@@ -45,7 +58,7 @@ class AttachmentClassLoaderTests {
             class Create : TypeOnlyCommandData(), Commands
         }
 
-        override fun verify(tx: TransactionForContract) {
+        override fun verify(tx: LedgerTransaction) {
             // Always accepts.
         }
 
@@ -54,7 +67,7 @@ class AttachmentClassLoaderTests {
 
         fun generateInitial(owner: PartyAndReference, magicNumber: Int, notary: Party): TransactionBuilder {
             val state = State(magicNumber)
-            return TransactionType.General.Builder(notary = notary).withItems(state, Command(Commands.Create(), owner.party.owningKey))
+            return TransactionBuilder(notary).withItems(state, Command(Commands.Create(), owner.party.owningKey))
         }
     }
 
@@ -111,7 +124,7 @@ class AttachmentClassLoaderTests {
 
         val jar = attachment.openAsJAR()
 
-        assert(jar.nextEntry != null)
+        assertNotNull(jar.nextEntry)
     }
 
     @Test
@@ -136,7 +149,7 @@ class AttachmentClassLoaderTests {
         val att2 = storage.importAttachment(ByteArrayInputStream(fakeAttachment("file2.txt", "some other data")))
 
         val cl = AttachmentsClassLoader(arrayOf(att0, att1, att2).map { storage.openAttachment(it)!! })
-        val txt = IOUtils.toString(cl.getResourceAsStream("file1.txt"))
+        val txt = IOUtils.toString(cl.getResourceAsStream("file1.txt"), Charsets.UTF_8.name())
         assertEquals("some data", txt)
     }
 
@@ -205,15 +218,14 @@ class AttachmentClassLoaderTests {
 
         val cl = AttachmentsClassLoader(arrayOf(att0, att1, att2).map { storage.openAttachment(it)!! }, FilteringClassLoader)
 
-        val kryo = createKryo()
-        kryo.classLoader = cl
-
-        val state2 = bytes.deserialize(kryo)
-        assert(state2.javaClass.classLoader is AttachmentsClassLoader)
+        val context = P2P_CONTEXT.withClassLoader(cl).withWhitelisted(contract.javaClass)
+        val state2 = bytes.deserialize(context = context)
+        assertTrue(state2.javaClass.classLoader is AttachmentsClassLoader)
         assertNotNull(state2)
     }
 
     // top level wrapper
+    @CordaSerializable
     class Data(val contract: Contract)
 
     @Test
@@ -222,7 +234,9 @@ class AttachmentClassLoaderTests {
 
         assertNotNull(data.contract)
 
-        val bytes = data.serialize()
+        val context2 = P2P_CONTEXT.withWhitelisted(data.contract.javaClass)
+
+        val bytes = data.serialize(context = context2)
 
         val storage = MockAttachmentStorage()
 
@@ -232,13 +246,22 @@ class AttachmentClassLoaderTests {
 
         val cl = AttachmentsClassLoader(arrayOf(att0, att1, att2).map { storage.openAttachment(it)!! }, FilteringClassLoader)
 
-        val kryo = createKryo()
-        kryo.classLoader = cl
+        val context = P2P_CONTEXT.withClassLoader(cl).withWhitelisted(Class.forName("net.corda.contracts.isolated.AnotherDummyContract", true, cl))
 
-        val state2 = bytes.deserialize(kryo)
+        val state2 = bytes.deserialize(context = context)
         assertEquals(cl, state2.contract.javaClass.classLoader)
         assertNotNull(state2)
+
+        // We should be able to load same class from a different class loader and have them be distinct.
+        val cl2 = AttachmentsClassLoader(arrayOf(att0, att1, att2).map { storage.openAttachment(it)!! }, FilteringClassLoader)
+
+        val context3 = P2P_CONTEXT.withClassLoader(cl2).withWhitelisted(Class.forName("net.corda.contracts.isolated.AnotherDummyContract", true, cl2))
+
+        val state3 = bytes.deserialize(context = context3)
+        assertEquals(cl2, state3.contract.javaClass.classLoader)
+        assertNotNull(state3)
     }
+
 
     @Test
     fun `test serialization of WireTransaction with statically loaded contract`() {
@@ -258,27 +281,21 @@ class AttachmentClassLoaderTests {
         val contract = contractClass.newInstance() as DummyContractBackdoor
         val tx = contract.generateInitial(MEGA_CORP.ref(0), 42, DUMMY_NOTARY)
         val storage = MockAttachmentStorage()
-        val kryo = createKryo()
+        val context = P2P_CONTEXT.withWhitelisted(contract.javaClass)
+                .withWhitelisted(Class.forName("net.corda.contracts.isolated.AnotherDummyContract\$State", true, child))
+                .withWhitelisted(Class.forName("net.corda.contracts.isolated.AnotherDummyContract\$Commands\$Create", true, child))
+                .withAttachmentStorage(storage)
 
         // todo - think about better way to push attachmentStorage down to serializer
-        kryo.attachmentStorage = storage
-
-        val attachmentRef = importJar(storage)
-
-        tx.addAttachment(storage.openAttachment(attachmentRef)!!.id)
-
-        val wireTransaction = tx.toWireTransaction()
-
-        val bytes = wireTransaction.serialize(kryo)
-
-        val kryo2 = createKryo()
-        // use empty attachmentStorage
-        kryo2.attachmentStorage = storage
-
-        val copiedWireTransaction = bytes.deserialize(kryo2)
-
+        val bytes = run {
+            val attachmentRef = importJar(storage)
+            tx.addAttachment(storage.openAttachment(attachmentRef)!!.id)
+            val wireTransaction = tx.toWireTransaction()
+            wireTransaction.serialize(context = context)
+        }
+        val copiedWireTransaction = bytes.deserialize(context = context)
         assertEquals(1, copiedWireTransaction.outputs.size)
-        val contract2 = copiedWireTransaction.outputs[0].data.contract as DummyContractBackdoor
+        val contract2 = copiedWireTransaction.getOutput(0).contract as DummyContractBackdoor
         assertEquals(42, contract2.inspectState(copiedWireTransaction.outputs[0].data))
     }
 
@@ -289,25 +306,21 @@ class AttachmentClassLoaderTests {
         val contract = contractClass.newInstance() as DummyContractBackdoor
         val tx = contract.generateInitial(MEGA_CORP.ref(0), 42, DUMMY_NOTARY)
         val storage = MockAttachmentStorage()
-        val kryo = createKryo()
 
         // todo - think about better way to push attachmentStorage down to serializer
-        kryo.attachmentStorage = storage
-
         val attachmentRef = importJar(storage)
+        val bytes = run {
 
-        tx.addAttachment(storage.openAttachment(attachmentRef)!!.id)
+            tx.addAttachment(storage.openAttachment(attachmentRef)!!.id)
 
-        val wireTransaction = tx.toWireTransaction()
+            val wireTransaction = tx.toWireTransaction()
 
-        val bytes = wireTransaction.serialize(kryo)
-
-        val kryo2 = createKryo()
+            wireTransaction.serialize(context = P2P_CONTEXT.withAttachmentStorage(storage))
+        }
         // use empty attachmentStorage
-        kryo2.attachmentStorage = MockAttachmentStorage()
 
         val e = assertFailsWith(MissingAttachmentsException::class) {
-            bytes.deserialize(kryo2)
+            bytes.deserialize(context = P2P_CONTEXT.withAttachmentStorage(MockAttachmentStorage()))
         }
         assertEquals(attachmentRef, e.ids.single())
     }

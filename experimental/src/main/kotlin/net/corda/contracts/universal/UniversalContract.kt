@@ -1,9 +1,12 @@
 package net.corda.contracts.universal
 
+import net.corda.contracts.BusinessCalendar
+import net.corda.contracts.FixOf
 import net.corda.core.contracts.*
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.transactions.TransactionBuilder
 import java.math.BigDecimal
 import java.time.Instant
@@ -11,14 +14,14 @@ import java.time.Instant
 val UNIVERSAL_PROGRAM_ID = UniversalContract()
 
 class UniversalContract : Contract {
-    data class State(override val participants: List<CompositeKey>,
+    data class State(override val participants: List<AbstractParty>,
                      val details: Arrangement) : ContractState {
         override val contract = UNIVERSAL_PROGRAM_ID
     }
 
     interface Commands : CommandData {
 
-        data class Fix(val fixes: List<net.corda.core.contracts.Fix>) : Commands
+        data class Fix(val fixes: List<net.corda.contracts.Fix>) : Commands
 
         // transition according to business rules defined in contract
         data class Action(val name: String) : Commands
@@ -35,27 +38,27 @@ class UniversalContract : Contract {
         class Split(val ratio: BigDecimal) : Commands
     }
 
-    fun eval(@Suppress("UNUSED_PARAMETER") tx: TransactionForContract, expr: Perceivable<Instant>): Instant? = when (expr) {
+    fun eval(@Suppress("UNUSED_PARAMETER") tx: LedgerTransaction, expr: Perceivable<Instant>): Instant? = when (expr) {
         is Const -> expr.value
         is StartDate -> null
         is EndDate -> null
         else -> throw Error("Unable to evaluate")
     }
 
-    fun eval(tx: TransactionForContract, expr: Perceivable<Boolean>): Boolean = when (expr) {
+    fun eval(tx: LedgerTransaction, expr: Perceivable<Boolean>): Boolean = when (expr) {
         is PerceivableAnd -> eval(tx, expr.left) && eval(tx, expr.right)
         is PerceivableOr -> eval(tx, expr.left) || eval(tx, expr.right)
         is Const<Boolean> -> expr.value
         is TimePerceivable -> when (expr.cmp) {
-            Comparison.LTE -> tx.timestamp!!.after!! <= eval(tx, expr.instant)
-            Comparison.GTE -> tx.timestamp!!.before!! >= eval(tx, expr.instant)
+            Comparison.LTE -> tx.timeWindow!!.fromTime!! <= eval(tx, expr.instant)
+            Comparison.GTE -> tx.timeWindow!!.untilTime!! >= eval(tx, expr.instant)
             else -> throw NotImplementedError("eval special")
         }
         is ActorPerceivable -> tx.commands.single().signers.contains(expr.actor.owningKey)
         else -> throw NotImplementedError("eval - Boolean - " + expr.javaClass.name)
     }
 
-    fun eval(tx: TransactionForContract, expr: Perceivable<BigDecimal>): BigDecimal =
+    fun eval(tx: LedgerTransaction, expr: Perceivable<BigDecimal>): BigDecimal =
             when (expr) {
                 is Const<BigDecimal> -> expr.value
                 is UnaryPlus -> {
@@ -78,7 +81,7 @@ class UniversalContract : Contract {
                     }
                 }
                 is Fixing -> {
-                    requireThat { "Fixing must be included" by false }
+                    requireThat { "Fixing must be included" using false }
                     0.0.bd
                 }
                 is Interest -> {
@@ -92,10 +95,10 @@ class UniversalContract : Contract {
                 else -> throw NotImplementedError("eval - BigDecimal - " + expr.javaClass.name)
             }
 
-    fun validateImmediateTransfers(tx: TransactionForContract, arrangement: Arrangement): Arrangement = when (arrangement) {
+    fun validateImmediateTransfers(tx: LedgerTransaction, arrangement: Arrangement): Arrangement = when (arrangement) {
         is Obligation -> {
             val amount = eval(tx, arrangement.amount)
-            requireThat { "transferred quantity is non-negative" by (amount >= BigDecimal.ZERO) }
+            requireThat { "transferred quantity is non-negative" using (amount >= BigDecimal.ZERO) }
             Obligation(const(amount), arrangement.currency, arrangement.from, arrangement.to)
         }
         is And -> And(arrangement.arrangements.map { validateImmediateTransfers(tx, it) }.toSet())
@@ -177,10 +180,10 @@ class UniversalContract : Contract {
                 else -> throw NotImplementedError("replaceNext " + arrangement.javaClass.name)
             }
 
-    override fun verify(tx: TransactionForContract) {
+    override fun verify(tx: LedgerTransaction) {
 
         requireThat {
-            "transaction has a single command".by(tx.commands.size == 1)
+            "transaction has a single command".using(tx.commands.size == 1)
         }
 
         val cmd = tx.commands.requireSingleCommand<UniversalContract.Commands>()
@@ -189,7 +192,7 @@ class UniversalContract : Contract {
 
         when (value) {
             is Commands.Action -> {
-                val inState = tx.inputs.single() as State
+                val inState = tx.inputsOfType<State>().single()
                 val arr = when (inState.details) {
                     is Actions -> inState.details
                     is RollOut -> reduceRollOut(inState.details)
@@ -207,10 +210,10 @@ class UniversalContract : Contract {
                 assert(rest is Zero)
 
                 requireThat {
-                    "action must be timestamped" by (tx.timestamp != null)
+                    "action must have a time-window" using (tx.timeWindow != null)
                     // "action must be authorized" by (cmd.signers.any { action.actors.any { party -> party.owningKey == it } })
                     // todo perhaps merge these two requirements?
-                    "condition must be met" by (eval(tx, action.condition))
+                    "condition must be met" using (eval(tx, action.condition))
                 }
 
                 // verify that any resulting transfers can be resolved
@@ -219,56 +222,56 @@ class UniversalContract : Contract {
 
                 when (tx.outputs.size) {
                     1 -> {
-                        val outState = tx.outputs.single() as State
+                        val outState = tx.outputsOfType<State>().single()
                         requireThat {
-                            "output state must match action result state" by (arrangement.equals(outState.details))
-                            "output state must match action result state" by (rest == zero)
+                            "output state must match action result state" using (arrangement.equals(outState.details))
+                            "output state must match action result state" using (rest == zero)
                         }
                     }
                     0 -> throw IllegalArgumentException("must have at least one out state")
                     else -> {
-                        val allContracts = And(tx.outputs.map { (it as State).details }.toSet())
+                        val allContracts = And(tx.outputsOfType<State>().map { it.details }.toSet())
 
                         requireThat {
-                            "output states must match action result state" by (arrangement.equals(allContracts))
+                            "output states must match action result state" using (arrangement.equals(allContracts))
                         }
 
                     }
                 }
             }
             is Commands.Issue -> {
-                val outState = tx.outputs.single() as State
+                val outState = tx.outputsOfType<State>().single()
                 requireThat {
-                    "the transaction is signed by all liable parties" by (liableParties(outState.details).all { it in cmd.signers })
-                    "the transaction has no input states" by tx.inputs.isEmpty()
+                    "the transaction is signed by all liable parties" using (liableParties(outState.details).all { it in cmd.signers })
+                    "the transaction has no input states" using tx.inputs.isEmpty()
                 }
             }
             is Commands.Move -> {
-                val inState = tx.inputs.single() as State
-                val outState = tx.outputs.single() as State
+                val inState = tx.inputsOfType<State>().single()
+                val outState = tx.outputsOfType<State>().single()
                 requireThat {
-                    "the transaction is signed by all liable parties" by
+                    "the transaction is signed by all liable parties" using
                             (liableParties(outState.details).all { it in cmd.signers })
-                    "output state does not reflect move command" by
+                    "output state does not reflect move command" using
                             (replaceParty(inState.details, value.from, value.to).equals(outState.details))
                 }
             }
             is Commands.Fix -> {
-                val inState = tx.inputs.single() as State
+                val inState = tx.inputsOfType<State>().single()
                 val arr = when (inState.details) {
                     is Actions -> inState.details
                     is RollOut -> reduceRollOut(inState.details)
                     else -> throw IllegalArgumentException("Unexpected arrangement, " + tx.inputs.single())
                 }
-                val outState = tx.outputs.single() as State
+                val outState = tx.outputsOfType<State>().single()
 
                 val unusedFixes = value.fixes.map { it.of }.toMutableSet()
                 val expectedArr = replaceFixing(tx, arr,
                         value.fixes.associateBy({ it.of }, { it.value }), unusedFixes)
 
                 requireThat {
-                    "relevant fixing must be included" by unusedFixes.isEmpty()
-                    "output state does not reflect fix command" by
+                    "relevant fixing must be included" using unusedFixes.isEmpty()
+                    "output state does not reflect fix command" using
                             (expectedArr.equals(outState.details))
                 }
             }
@@ -277,7 +280,7 @@ class UniversalContract : Contract {
     }
 
     @Suppress("UNCHECKED_CAST")
-    fun <T> replaceFixing(tx: TransactionForContract, perceivable: Perceivable<T>,
+    fun <T> replaceFixing(tx: LedgerTransaction, perceivable: Perceivable<T>,
                           fixings: Map<FixOf, BigDecimal>, unusedFixings: MutableSet<FixOf>): Perceivable<T> =
             when (perceivable) {
                 is Const -> perceivable
@@ -297,11 +300,11 @@ class UniversalContract : Contract {
                 else -> throw NotImplementedError("replaceFixing - " + perceivable.javaClass.name)
             }
 
-    fun replaceFixing(tx: TransactionForContract, arr: Action,
+    fun replaceFixing(tx: LedgerTransaction, arr: Action,
                       fixings: Map<FixOf, BigDecimal>, unusedFixings: MutableSet<FixOf>) =
             Action(arr.name, replaceFixing(tx, arr.condition, fixings, unusedFixings), replaceFixing(tx, arr.arrangement, fixings, unusedFixings))
 
-    fun replaceFixing(tx: TransactionForContract, arr: Arrangement,
+    fun replaceFixing(tx: LedgerTransaction, arr: Arrangement,
                       fixings: Map<FixOf, BigDecimal>, unusedFixings: MutableSet<FixOf>): Arrangement =
             when (arr) {
                 is Zero -> arr
@@ -316,7 +319,7 @@ class UniversalContract : Contract {
     override val legalContractReference: SecureHash
         get() = throw UnsupportedOperationException()
 
-    fun generateIssue(tx: TransactionBuilder, arrangement: Arrangement, at: PartyAndReference, notary: CompositeKey) {
+    fun generateIssue(tx: TransactionBuilder, arrangement: Arrangement, at: PartyAndReference, notary: Party) {
         check(tx.inputStates().isEmpty())
         tx.addOutputState(State(listOf(notary), arrangement))
         tx.addCommand(Commands.Issue(), at.party.owningKey)

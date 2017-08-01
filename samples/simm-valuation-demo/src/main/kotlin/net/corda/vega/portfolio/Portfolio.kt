@@ -1,12 +1,14 @@
 package net.corda.vega.portfolio
 
+import net.corda.client.rpc.notUsed
 import net.corda.core.contracts.*
-import net.corda.core.crypto.Party
+import net.corda.core.identity.Party
+import net.corda.core.internal.sum
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.node.ServiceHub
-import net.corda.core.sum
 import net.corda.vega.contracts.IRSState
 import net.corda.vega.contracts.SwapData
+import java.math.BigDecimal
 import java.time.LocalDate
 
 /**
@@ -21,7 +23,7 @@ data class Portfolio(private val tradeStateAndRefs: List<StateAndRef<IRSState>>,
     val swaps: List<SwapData> by lazy { trades.map { it.swap } }
     val refs: List<StateRef> by lazy { tradeStateAndRefs.map { it.ref } }
 
-    fun getNotionalForParty(party: Party) = trades.map { it.swap.getLegForParty(party).notional }.sum()
+    fun getNotionalForParty(party: Party): BigDecimal = trades.map { it.swap.getLegForParty(party).notional }.sum()
 
     fun update(curTrades: List<StateAndRef<IRSState>>): Portfolio {
         return copy(tradeStateAndRefs = curTrades)
@@ -33,7 +35,9 @@ fun List<StateAndRef<IRSState>>.toPortfolio(): Portfolio {
 }
 
 inline fun <reified T : ContractState> List<StateRef>.toStateAndRef(rpc: CordaRPCOps): List<StateAndRef<T>> {
-    val stateRefs = rpc.vaultAndUpdates().first.associateBy { it.ref }
+    val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+    vaultUpdates.notUsed()
+    val stateRefs = vault.associateBy { it.ref }
     return mapNotNull { stateRefs[it] }.filterStatesOfType<T>()
 }
 

@@ -1,9 +1,10 @@
 package net.corda.contracts.universal
 
-import net.corda.core.utilities.DUMMY_NOTARY
+import net.corda.testing.DUMMY_NOTARY
 import net.corda.testing.transaction
 import org.junit.Test
 import java.time.Instant
+import kotlin.test.assertEquals
 
 class ZeroCouponBond {
 
@@ -32,16 +33,16 @@ class ZeroCouponBond {
     val transfer = arrange { highStreetBank.owes(acmeCorp, 100.K, GBP) }
     val transferWrong = arrange { highStreetBank.owes(acmeCorp, 80.K, GBP) }
 
-    val inState = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), contract)
+    val inState = UniversalContract.State(listOf(DUMMY_NOTARY), contract)
 
-    val outState = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), transfer)
-    val outStateWrong = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), transferWrong)
+    val outState = UniversalContract.State(listOf(DUMMY_NOTARY), transfer)
+    val outStateWrong = UniversalContract.State(listOf(DUMMY_NOTARY), transferWrong)
 
-    val outStateMove = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), contractMove)
+    val outStateMove = UniversalContract.State(listOf(DUMMY_NOTARY), contractMove)
 
     @Test
     fun basic() {
-        assert(Zero().equals(Zero()))
+        assertEquals(Zero(), Zero())
     }
 
 
@@ -69,7 +70,7 @@ class ZeroCouponBond {
         transaction {
             input { inState }
             output { outState }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             tweak {
                 command(highStreetBank.owningKey) { UniversalContract.Commands.Action("some undefined name") }
@@ -87,7 +88,7 @@ class ZeroCouponBond {
         transaction {
             input { inState }
             output { outState }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             command(momAndPop.owningKey) { UniversalContract.Commands.Action("execute") }
             this `fails with` "condition must be met"
@@ -99,7 +100,7 @@ class ZeroCouponBond {
         transaction {
             input { inState }
             output { outStateWrong }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             command(acmeCorp.owningKey) { UniversalContract.Commands.Action("execute") }
             this `fails with` "output state must match action result state"

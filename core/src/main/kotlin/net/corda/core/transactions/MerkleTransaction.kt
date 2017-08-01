@@ -2,67 +2,124 @@ package net.corda.core.transactions
 
 import net.corda.core.contracts.*
 import net.corda.core.crypto.*
-import net.corda.core.crypto.SecureHash.Companion.zeroHash
-import net.corda.core.serialization.createKryo
-import net.corda.core.serialization.extendKryoHash
+import net.corda.core.identity.Party
+import net.corda.core.serialization.CordaSerializable
+import net.corda.core.serialization.SerializationDefaults.P2P_CONTEXT
 import net.corda.core.serialization.serialize
-import java.util.*
-
-fun <T : Any> serializedHash(x: T): SecureHash {
-    val kryo = extendKryoHash(createKryo()) // Dealing with HashMaps inside states.
-    return x.serialize(kryo).hash
-}
+import java.nio.ByteBuffer
+import java.util.function.Predicate
 
 /**
- * Interface implemented by WireTransaction and FilteredLeaves.
- * Property traversableList assures that we always calculate hashes in the same order, lets us define which
- * fields of WireTransaction will be included in id calculation or partial merkle tree building.
+ * If a privacy salt is provided, the resulted output (merkle-leaf) is computed as
+ * Hash(serializedObject || Hash(privacy_salt || obj_index_in_merkle_tree)).
+ */
+fun <T : Any> serializedHash(x: T, privacySalt: PrivacySalt?, index: Int): SecureHash {
+    return if (privacySalt != null)
+        serializedHash(x, computeNonce(privacySalt, index))
+    else
+        serializedHash(x)
+}
+
+fun <T : Any> serializedHash(x: T, nonce: SecureHash): SecureHash {
+    return if (x !is PrivacySalt) // PrivacySalt is not required to have an accompanied nonce.
+        (x.serialize(context = P2P_CONTEXT.withoutReferences()).bytes + nonce.bytes).sha256()
+    else
+        serializedHash(x)
+}
+
+fun <T : Any> serializedHash(x: T): SecureHash = x.serialize(context = P2P_CONTEXT.withoutReferences()).bytes.sha256()
+
+/** The nonce is computed as Hash(privacySalt || index). */
+fun computeNonce(privacySalt: PrivacySalt, index: Int) = (privacySalt.bytes + ByteBuffer.allocate(4).putInt(index).array()).sha256()
+
+/**
+ * Implemented by [WireTransaction] and [FilteredLeaves]. A TraversableTransaction allows you to iterate
+ * over the flattened components of the underlying transaction structure, taking into account that some
+ * may be missing in the case of this representing a "torn" transaction. Please see the user guide section
+ * "Transaction tear-offs" to learn more about this feature.
+ *
+ * The [availableComponents] property is used for calculation of the transaction's [MerkleTree], which is in
+ * turn used to derive the ID hash.
  */
 interface TraversableTransaction {
     val inputs: List<StateRef>
     val attachments: List<SecureHash>
     val outputs: List<TransactionState<ContractState>>
-    val commands: List<Command>
+    val commands: List<Command<*>>
     val notary: Party?
-    val mustSign: List<CompositeKey>
-    val type: TransactionType?
-    val timestamp: Timestamp?
+    val timeWindow: TimeWindow?
+    /**
+     * For privacy purposes, each part of a transaction should be accompanied by a nonce.
+     * To avoid storing a random number (nonce) per component, an initial "salt" is the sole value utilised,
+     * so that all component nonces are deterministically computed in the following way:
+     * nonce1 = H(salt || 1)
+     * nonce2 = H(salt || 2)
+     *
+     * Thus, all of the nonces are "independent" in the sense that knowing one or some of them, you can learn
+     * nothing about the rest.
+     */
+    val privacySalt: PrivacySalt?
 
     /**
-     * Traversing transaction fields with a list function over transaction contents. Used for leaves hashes calculation
-     * and user provided filtering and checking of filtered transaction.
+     * Returns a flattened list of all the components that are present in the transaction, in the following order:
+     *
+     * - Each input that is present
+     * - Each attachment that is present
+     * - Each output that is present
+     * - Each command that is present
+     * - The notary [Party], if present
+     * - The time-window of the transaction, if present
+     * - The privacy salt required for nonces, always presented in [WireTransaction] and always null in [FilteredLeaves]
      */
-    // We may want to specify our own behaviour on certain tx fields.
-    // Like if we include them at all, what to do with null values, if we treat list as one or not etc. for building
-    // torn-off transaction and id calculation.
-    val traversableList: List<Any>
+    val availableComponents: List<Any>
+        // NOTE: if the order below is altered or components are added/removed in the future, one should also reflect
+        //      this change to the indexOffsets() method in WireTransaction.
         get() {
-            val traverseList = mutableListOf(inputs, attachments, outputs, commands).flatten().toMutableList()
-            if (notary != null) traverseList.add(notary!!)
-            traverseList.addAll(mustSign)
-            if (type != null) traverseList.add(type!!)
-            if (timestamp != null) traverseList.add(timestamp!!)
-            return traverseList
+            // We may want to specify our own behaviour on certain tx fields.
+            // Like if we include them at all, what to do with null values, if we treat list as one or not etc. for building
+            // torn-off transaction and id calculation.
+            val result = mutableListOf(inputs, attachments, outputs, commands).flatten().toMutableList()
+            notary?.let { result += it }
+            timeWindow?.let { result += it }
+            privacySalt?.let { result += it }
+            return result
         }
 
-    // Calculation of all leaves hashes that are needed for calculation of transaction id and partial Merkle branches.
-    fun calculateLeavesHashes(): List<SecureHash> = traversableList.map { serializedHash(it) }
+    /**
+     * Calculate the hashes of the sub-components of the transaction, that are used to build its Merkle tree.
+     * The root of the tree is the transaction identifier. The tree structure is helpful for privacy, please
+     * see the user-guide section "Transaction tear-offs" to learn more about this topic.
+     */
+    val availableComponentHashes: List<SecureHash> get() = availableComponents.mapIndexed { index, it -> serializedHash(it, privacySalt, index) }
 }
 
 /**
  * Class that holds filtered leaves for a partial Merkle transaction. We assume mixed leaf types, notice that every
- * field from WireTransaction can be used in PartialMerkleTree calculation.
+ * field from [WireTransaction] can be used in [PartialMerkleTree] calculation, except for the privacySalt.
+ * A list of nonces is also required to (re)construct component hashes.
  */
+@CordaSerializable
 class FilteredLeaves(
         override val inputs: List<StateRef>,
         override val attachments: List<SecureHash>,
         override val outputs: List<TransactionState<ContractState>>,
-        override val commands: List<Command>,
+        override val commands: List<Command<*>>,
         override val notary: Party?,
-        override val mustSign: List<CompositeKey>,
-        override val type: TransactionType?,
-        override val timestamp: Timestamp?
+        override val timeWindow: TimeWindow?,
+        val nonces: List<SecureHash>
 ) : TraversableTransaction {
+
+    /**
+     * PrivacySalt should be always null for FilteredLeaves, because making it accidentally visible would expose all
+     * nonces (including filtered out components) causing privacy issues, see [serializedHash] and
+     * [TraversableTransaction.privacySalt].
+     */
+    override val privacySalt: PrivacySalt? get() = null
+
+    init {
+        require(availableComponents.size == nonces.size) { "Each visible component should be accompanied by a nonce." }
+    }
+
     /**
      * Function that checks the whole filtered structure.
      * Force type checking on a structure that we obtained, so we don't sign more than expected.
@@ -73,9 +130,11 @@ class FilteredLeaves(
      * @returns false if no elements were matched on a structure or checkingFun returned false.
      */
     fun checkWithFun(checkingFun: (Any) -> Boolean): Boolean {
-        val checkList = traversableList.map { checkingFun(it) }
-        return (!checkList.isEmpty()) && checkList.all { true }
+        val checkList = availableComponents.map { checkingFun(it) }
+        return (!checkList.isEmpty()) && checkList.all { it }
     }
+
+    override val availableComponentHashes: List<SecureHash> get() = availableComponents.mapIndexed { index, it -> serializedHash(it, nonces[index]) }
 }
 
 /**
@@ -84,6 +143,7 @@ class FilteredLeaves(
  * @param filteredLeaves Leaves included in a filtered transaction.
  * @param partialMerkleTree Merkle branch needed to verify filteredLeaves.
  */
+@CordaSerializable
 class FilteredTransaction private constructor(
         val rootHash: SecureHash,
         val filteredLeaves: FilteredLeaves,
@@ -95,12 +155,13 @@ class FilteredTransaction private constructor(
          * @param wtx WireTransaction to be filtered.
          * @param filtering filtering over the whole WireTransaction
          */
+        @JvmStatic
         fun buildMerkleTransaction(wtx: WireTransaction,
-                                   filtering: (Any) -> Boolean
+                                   filtering: Predicate<Any>
         ): FilteredTransaction {
             val filteredLeaves = wtx.filterWithFun(filtering)
-            val merkleTree = wtx.getMerkleTree()
-            val pmt = PartialMerkleTree.build(merkleTree, filteredLeaves.calculateLeavesHashes())
+            val merkleTree = wtx.merkleTree
+            val pmt = PartialMerkleTree.build(merkleTree, filteredLeaves.availableComponentHashes)
             return FilteredTransaction(merkleTree.hash, filteredLeaves, pmt)
         }
     }
@@ -110,17 +171,9 @@ class FilteredTransaction private constructor(
      */
     @Throws(MerkleTreeException::class)
     fun verify(): Boolean {
-        val hashes: List<SecureHash> = filteredLeaves.calculateLeavesHashes()
+        val hashes: List<SecureHash> = filteredLeaves.availableComponentHashes
         if (hashes.isEmpty())
             throw MerkleTreeException("Transaction without included leaves.")
         return partialMerkleTree.verify(rootHash, hashes)
-    }
-
-    /**
-     * Runs verification of Partial Merkle Branch against [rootHash]. Checks filteredLeaves with provided checkingFun.
-     */
-    @Throws(MerkleTreeException::class)
-    fun verifyWithFunction(checkingFun: (Any) -> Boolean): Boolean {
-        return verify() && filteredLeaves.checkWithFun { checkingFun(it) }
     }
 }

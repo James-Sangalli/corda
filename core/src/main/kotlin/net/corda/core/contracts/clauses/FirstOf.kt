@@ -3,14 +3,14 @@ package net.corda.core.contracts.clauses
 import net.corda.core.contracts.AuthenticatedObject
 import net.corda.core.contracts.CommandData
 import net.corda.core.contracts.ContractState
-import net.corda.core.contracts.TransactionForContract
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.utilities.loggerFor
 import java.util.*
 
 /**
  * Compose a number of clauses, such that the first match is run, and it errors if none is run.
  */
-class FirstOf<S : ContractState, C : CommandData, K : Any>(val firstClause: Clause<S, C, K>, vararg remainingClauses: Clause<S, C, K>) : CompositeClause<S, C, K>() {
+class FirstOf<S : ContractState, C : CommandData, K : Any>(firstClause: Clause<S, C, K>, vararg remainingClauses: Clause<S, C, K>) : CompositeClause<S, C, K>() {
     companion object {
         val logger = loggerFor<FirstOf<*, *, *>>()
     }
@@ -33,7 +33,7 @@ class FirstOf<S : ContractState, C : CommandData, K : Any>(val firstClause: Clau
         clauses.addAll(remainingClauses)
     }
 
-    override fun verify(tx: TransactionForContract, inputs: List<S>, outputs: List<S>, commands: List<AuthenticatedObject<C>>, groupingKey: K?): Set<C> {
+    override fun verify(tx: LedgerTransaction, inputs: List<S>, outputs: List<S>, commands: List<AuthenticatedObject<C>>, groupingKey: K?): Set<C> {
         return matchedClause(commands).verify(tx, inputs, outputs, commands, groupingKey)
     }
 

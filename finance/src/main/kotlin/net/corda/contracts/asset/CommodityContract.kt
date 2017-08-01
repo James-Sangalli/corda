@@ -1,5 +1,6 @@
 package net.corda.contracts.asset
 
+import net.corda.contracts.Commodity
 import net.corda.contracts.clause.AbstractConserveAmount
 import net.corda.contracts.clause.AbstractIssue
 import net.corda.contracts.clause.NoZeroSizedOutputs
@@ -7,10 +8,12 @@ import net.corda.core.contracts.*
 import net.corda.core.contracts.clauses.AnyOf
 import net.corda.core.contracts.clauses.GroupClauseVerifier
 import net.corda.core.contracts.clauses.verifyClause
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
 import net.corda.core.crypto.newSecureRandom
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
+import net.corda.core.serialization.CordaSerializable
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.core.transactions.TransactionBuilder
 import java.util.*
 
@@ -46,8 +49,6 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
      */
     override val legalContractReference: SecureHash = SecureHash.sha256("https://www.big-book-of-banking-law.gov/commodity-claims.html")
 
-    override val conserveClause: AbstractConserveAmount<State, Commands, Commodity> = Clauses.ConserveAmount()
-
     /**
      * The clauses for this contract are essentially:
      *
@@ -69,7 +70,7 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
             /**
              * Group commodity states by issuance definition (issuer and underlying commodity).
              */
-            override fun groupStates(tx: TransactionForContract)
+            override fun groupStates(tx: LedgerTransaction)
                     = tx.groupStates<State, Issued<Commodity>> { it.amount.token }
         }
 
@@ -86,6 +87,7 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
         /**
          * Standard clause for conserving the amount from input to output.
          */
+        @CordaSerializable
         class ConserveAmount : AbstractConserveAmount<State, Commands, Commodity>()
     }
 
@@ -94,24 +96,25 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
             override val amount: Amount<Issued<Commodity>>,
 
             /** There must be a MoveCommand signed by this key to claim the amount */
-            override val owner: CompositeKey
+            override val owner: AbstractParty
     ) : FungibleAsset<Commodity> {
-        constructor(deposit: PartyAndReference, amount: Amount<Commodity>, owner: CompositeKey)
+        constructor(deposit: PartyAndReference, amount: Amount<Commodity>, owner: AbstractParty)
                 : this(Amount(amount.quantity, Issued(deposit, amount.token)), owner)
 
         override val contract = COMMODITY_PROGRAM_ID
-        override val exitKeys = Collections.singleton(owner)
+        override val exitKeys = Collections.singleton(owner.owningKey)
         override val participants = listOf(owner)
 
-        override fun move(newAmount: Amount<Issued<Commodity>>, newOwner: CompositeKey): FungibleAsset<Commodity>
-                = copy(amount = amount.copy(newAmount.quantity, amount.token), owner = newOwner)
+        override fun move(newAmount: Amount<Issued<Commodity>>, newOwner: AbstractParty): FungibleAsset<Commodity>
+                = copy(amount = amount.copy(newAmount.quantity), owner = newOwner)
 
         override fun toString() = "Commodity($amount at ${amount.token.issuer} owned by $owner)"
 
-        override fun withNewOwner(newOwner: CompositeKey) = Pair(Commands.Move(), copy(owner = newOwner))
+        override fun withNewOwner(newOwner: AbstractParty) = Pair(Commands.Move(), copy(owner = newOwner))
     }
 
     // Just for grouping
+    @CordaSerializable
     interface Commands : FungibleAsset.Commands {
         /**
          * A command stating that money has been moved, optionally to fulfil another contract.
@@ -135,7 +138,7 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
         data class Exit(override val amount: Amount<Issued<Commodity>>) : Commands, FungibleAsset.Commands.Exit<Commodity>
     }
 
-    override fun verify(tx: TransactionForContract)
+    override fun verify(tx: LedgerTransaction)
             = verifyClause(tx, Clauses.Group(), extractCommands(tx.commands))
 
     override fun extractCommands(commands: Collection<AuthenticatedObject<CommandData>>): List<AuthenticatedObject<Commands>>
@@ -144,22 +147,17 @@ class CommodityContract : OnLedgerAsset<Commodity, CommodityContract.Commands, C
     /**
      * Puts together an issuance transaction from the given template, that starts out being owned by the given pubkey.
      */
-    fun generateIssue(tx: TransactionBuilder, tokenDef: Issued<Commodity>, pennies: Long, owner: CompositeKey, notary: Party)
+    fun generateIssue(tx: TransactionBuilder, tokenDef: Issued<Commodity>, pennies: Long, owner: AbstractParty, notary: Party)
             = generateIssue(tx, Amount(pennies, tokenDef), owner, notary)
 
     /**
      * Puts together an issuance transaction for the specified amount that starts out being owned by the given pubkey.
      */
-    fun generateIssue(tx: TransactionBuilder, amount: Amount<Issued<Commodity>>, owner: CompositeKey, notary: Party) {
-        check(tx.inputStates().isEmpty())
-        check(tx.outputStates().map { it.data }.sumCashOrNull() == null)
-        val at = amount.token.issuer
-        tx.addOutputState(TransactionState(State(amount, owner), notary))
-        tx.addCommand(generateIssueCommand(), at.party.owningKey)
-    }
+    fun generateIssue(tx: TransactionBuilder, amount: Amount<Issued<Commodity>>, owner: AbstractParty, notary: Party)
+            = generateIssue(tx, TransactionState(State(amount, owner), notary), generateIssueCommand())
 
 
-    override fun deriveState(txState: TransactionState<State>, amount: Amount<Issued<Commodity>>, owner: CompositeKey)
+    override fun deriveState(txState: TransactionState<State>, amount: Amount<Issued<Commodity>>, owner: AbstractParty)
             = txState.copy(data = txState.data.copy(amount = amount, owner = owner))
 
     override fun generateExitCommand(amount: Amount<Issued<Commodity>>) = Commands.Exit(amount)

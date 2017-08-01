@@ -1,28 +1,21 @@
 package net.corda.contracts
 
 import net.corda.contracts.asset.*
-import net.corda.contracts.testing.fillWithSomeTestCash
+import net.corda.testing.contracts.fillWithSomeTestCash
 import net.corda.core.contracts.*
-import net.corda.core.crypto.Party
-import net.corda.core.crypto.SecureHash
-import net.corda.core.crypto.composite
-import net.corda.core.days
-import net.corda.core.node.recordTransactions
+import net.corda.core.utilities.days
+import net.corda.core.identity.AnonymousParty
+import net.corda.core.identity.Party
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.VaultService
-import net.corda.core.seconds
-import net.corda.core.transactions.LedgerTransaction
+import net.corda.core.utilities.seconds
 import net.corda.core.transactions.SignedTransaction
-import net.corda.core.utilities.DUMMY_NOTARY
-import net.corda.core.utilities.DUMMY_NOTARY_KEY
-import net.corda.core.utilities.DUMMY_PUBKEY_1
-import net.corda.core.utilities.TEST_TX_TIME
-import net.corda.node.services.vault.NodeVaultService
+import net.corda.core.transactions.TransactionBuilder
 import net.corda.node.utilities.configureDatabase
-import net.corda.node.utilities.databaseTransaction
 import net.corda.testing.*
 import net.corda.testing.node.MockServices
 import net.corda.testing.node.makeTestDataSourceProperties
+import net.corda.testing.node.makeTestDatabaseProperties
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.junit.runners.Parameterized
@@ -40,10 +33,10 @@ interface ICommercialPaperTestTemplate {
     fun getMoveCommand(): CommandData
 }
 
-class JavaCommercialPaperTest() : ICommercialPaperTestTemplate {
+class JavaCommercialPaperTest : ICommercialPaperTestTemplate {
     override fun getPaper(): ICommercialPaperState = JavaCommercialPaper.State(
             MEGA_CORP.ref(123),
-            MEGA_CORP_PUBKEY,
+            MEGA_CORP,
             1000.DOLLARS `issued by` MEGA_CORP.ref(123),
             TEST_TX_TIME + 7.days
     )
@@ -53,10 +46,10 @@ class JavaCommercialPaperTest() : ICommercialPaperTestTemplate {
     override fun getMoveCommand(): CommandData = JavaCommercialPaper.Commands.Move()
 }
 
-class KotlinCommercialPaperTest() : ICommercialPaperTestTemplate {
+class KotlinCommercialPaperTest : ICommercialPaperTestTemplate {
     override fun getPaper(): ICommercialPaperState = CommercialPaper.State(
             issuance = MEGA_CORP.ref(123),
-            owner = MEGA_CORP_PUBKEY,
+            owner = MEGA_CORP,
             faceValue = 1000.DOLLARS `issued by` MEGA_CORP.ref(123),
             maturityDate = TEST_TX_TIME + 7.days
     )
@@ -66,10 +59,10 @@ class KotlinCommercialPaperTest() : ICommercialPaperTestTemplate {
     override fun getMoveCommand(): CommandData = CommercialPaper.Commands.Move()
 }
 
-class KotlinCommercialPaperLegacyTest() : ICommercialPaperTestTemplate {
+class KotlinCommercialPaperLegacyTest : ICommercialPaperTestTemplate {
     override fun getPaper(): ICommercialPaperState = CommercialPaperLegacy.State(
             issuance = MEGA_CORP.ref(123),
-            owner = MEGA_CORP_PUBKEY,
+            owner = MEGA_CORP,
             faceValue = 1000.DOLLARS `issued by` MEGA_CORP.ref(123),
             maturityDate = TEST_TX_TIME + 7.days
     )
@@ -96,15 +89,15 @@ class CommercialPaperTestsGeneric {
         val someProfits = 1200.DOLLARS `issued by` issuer
         ledger {
             unverifiedTransaction {
-                output("alice's $900", 900.DOLLARS.CASH `issued by` issuer `owned by` ALICE_PUBKEY)
-                output("some profits", someProfits.STATE `owned by` MEGA_CORP_PUBKEY)
+                output("alice's $900", 900.DOLLARS.CASH `issued by` issuer `owned by` ALICE)
+                output("some profits", someProfits.STATE `owned by` MEGA_CORP)
             }
 
             // Some CP is issued onto the ledger by MegaCorp.
             transaction("Issuance") {
                 output("paper") { thisTest.getPaper() }
                 command(MEGA_CORP_PUBKEY) { thisTest.getIssueCommand(DUMMY_NOTARY) }
-                timestamp(TEST_TX_TIME)
+                timeWindow(TEST_TX_TIME)
                 this.verifies()
             }
 
@@ -113,8 +106,8 @@ class CommercialPaperTestsGeneric {
             transaction("Trade") {
                 input("paper")
                 input("alice's $900")
-                output("borrowed $900") { 900.DOLLARS.CASH `issued by` issuer `owned by` MEGA_CORP_PUBKEY }
-                output("alice's paper") { "paper".output<ICommercialPaperState>() `owned by` ALICE_PUBKEY }
+                output("borrowed $900") { 900.DOLLARS.CASH `issued by` issuer `owned by` MEGA_CORP }
+                output("alice's paper") { "paper".output<ICommercialPaperState>() `owned by` ALICE }
                 command(ALICE_PUBKEY) { Cash.Commands.Move() }
                 command(MEGA_CORP_PUBKEY) { thisTest.getMoveCommand() }
                 this.verifies()
@@ -127,8 +120,8 @@ class CommercialPaperTestsGeneric {
                 input("some profits")
 
                 fun TransactionDSL<TransactionDSLInterpreter>.outputs(aliceGetsBack: Amount<Issued<Currency>>) {
-                    output("Alice's profit") { aliceGetsBack.STATE `owned by` ALICE_PUBKEY }
-                    output("Change") { (someProfits - aliceGetsBack).STATE `owned by` MEGA_CORP_PUBKEY }
+                    output("Alice's profit") { aliceGetsBack.STATE `owned by` ALICE }
+                    output("Change") { (someProfits - aliceGetsBack).STATE `owned by` MEGA_CORP }
                 }
 
                 command(MEGA_CORP_PUBKEY) { Cash.Commands.Move() }
@@ -136,17 +129,17 @@ class CommercialPaperTestsGeneric {
 
                 tweak {
                     outputs(700.DOLLARS `issued by` issuer)
-                    timestamp(TEST_TX_TIME + 8.days)
+                    timeWindow(TEST_TX_TIME + 8.days)
                     this `fails with` "received amount equals the face value"
                 }
                 outputs(1000.DOLLARS `issued by` issuer)
 
 
                 tweak {
-                    timestamp(TEST_TX_TIME + 2.days)
+                    timeWindow(TEST_TX_TIME + 2.days)
                     this `fails with` "must have matured"
                 }
-                timestamp(TEST_TX_TIME + 8.days)
+                timeWindow(TEST_TX_TIME + 8.days)
 
                 tweak {
                     output { "paper".output<ICommercialPaperState>() }
@@ -163,7 +156,7 @@ class CommercialPaperTestsGeneric {
         transaction {
             output { thisTest.getPaper() }
             command(DUMMY_PUBKEY_1) { thisTest.getIssueCommand(DUMMY_NOTARY) }
-            timestamp(TEST_TX_TIME)
+            timeWindow(TEST_TX_TIME)
             this `fails with` "output states are issued by a command signer"
         }
     }
@@ -173,7 +166,7 @@ class CommercialPaperTestsGeneric {
         transaction {
             output { thisTest.getPaper().withFaceValue(0.DOLLARS `issued by` issuer) }
             command(MEGA_CORP_PUBKEY) { thisTest.getIssueCommand(DUMMY_NOTARY) }
-            timestamp(TEST_TX_TIME)
+            timeWindow(TEST_TX_TIME)
             this `fails with` "output values sum to more than the inputs"
         }
     }
@@ -183,7 +176,7 @@ class CommercialPaperTestsGeneric {
         transaction {
             output { thisTest.getPaper().withMaturityDate(TEST_TX_TIME - 10.days) }
             command(MEGA_CORP_PUBKEY) { thisTest.getIssueCommand(DUMMY_NOTARY) }
-            timestamp(TEST_TX_TIME)
+            timeWindow(TEST_TX_TIME)
             this `fails with` "maturity date is not in the past"
         }
     }
@@ -194,14 +187,9 @@ class CommercialPaperTestsGeneric {
             input(thisTest.getPaper())
             output { thisTest.getPaper() }
             command(MEGA_CORP_PUBKEY) { thisTest.getIssueCommand(DUMMY_NOTARY) }
-            timestamp(TEST_TX_TIME)
+            timeWindow(TEST_TX_TIME)
             this `fails with` "output values sum to more than the inputs"
         }
-    }
-
-    fun cashOutputsToVault(vararg outputs: TransactionState<Cash.State>): Pair<LedgerTransaction, List<StateAndRef<Cash.State>>> {
-        val ltx = LedgerTransaction(emptyList(), listOf(*outputs), emptyList(), emptyList(), SecureHash.randomSHA256(), null, emptyList(), null, TransactionType.General())
-        return Pair(ltx, outputs.mapIndexed { index, state -> StateAndRef(state, StateRef(ltx.id, index)) })
     }
 
     /**
@@ -217,22 +205,23 @@ class CommercialPaperTestsGeneric {
     private lateinit var aliceVaultService: VaultService
     private lateinit var alicesVault: Vault<ContractState>
 
+    private val notaryServices = MockServices(DUMMY_NOTARY_KEY)
+
     private lateinit var moveTX: SignedTransaction
 
     @Test
     fun `issue move and then redeem`() {
-
+        initialiseTestSerialization()
         val dataSourcePropsAlice = makeTestDataSourceProperties()
-        val dataSourceAndDatabaseAlice = configureDatabase(dataSourcePropsAlice)
-        val databaseAlice = dataSourceAndDatabaseAlice.second
-        databaseTransaction(databaseAlice) {
+        val databaseAlice = configureDatabase(dataSourcePropsAlice, makeTestDatabaseProperties())
+        databaseAlice.transaction {
 
-            aliceServices = object : MockServices() {
-                override val vaultService: VaultService = NodeVaultService(this, dataSourcePropsAlice)
+            aliceServices = object : MockServices(ALICE_KEY) {
+                override val vaultService: VaultService = makeVaultService(dataSourcePropsAlice)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
-                        storageService.validatedTransactions.addTransaction(stx)
+                        validatedTransactions.addTransaction(stx)
                     }
                     // Refactored to use notifyAll() as we have no other unit test for that method with multiple transactions.
                     vaultService.notifyAll(txs.map { it.tx })
@@ -243,16 +232,15 @@ class CommercialPaperTestsGeneric {
         }
 
         val dataSourcePropsBigCorp = makeTestDataSourceProperties()
-        val dataSourceAndDatabaseBigCorp = configureDatabase(dataSourcePropsBigCorp)
-        val databaseBigCorp = dataSourceAndDatabaseBigCorp.second
-        databaseTransaction(databaseBigCorp) {
+        val databaseBigCorp = configureDatabase(dataSourcePropsBigCorp, makeTestDatabaseProperties())
+        databaseBigCorp.transaction {
 
-            bigCorpServices = object : MockServices() {
-                override val vaultService: VaultService = NodeVaultService(this, dataSourcePropsBigCorp)
+            bigCorpServices = object : MockServices(BIG_CORP_KEY) {
+                override val vaultService: VaultService = makeVaultService(dataSourcePropsBigCorp)
 
                 override fun recordTransactions(txs: Iterable<SignedTransaction>) {
                     for (stx in txs) {
-                        storageService.validatedTransactions.addTransaction(stx)
+                        validatedTransactions.addTransaction(stx)
                     }
                     // Refactored to use notifyAll() as we have no other unit test for that method with multiple transactions.
                     vaultService.notifyAll(txs.map { it.tx })
@@ -263,59 +251,64 @@ class CommercialPaperTestsGeneric {
         }
 
         // Propagate the cash transactions to each side.
-        aliceServices.recordTransactions(bigCorpVault.states.map { bigCorpServices.storageService.validatedTransactions.getTransaction(it.ref.txhash)!! })
-        bigCorpServices.recordTransactions(alicesVault.states.map { aliceServices.storageService.validatedTransactions.getTransaction(it.ref.txhash)!! })
+        aliceServices.recordTransactions(bigCorpVault.states.map { bigCorpServices.validatedTransactions.getTransaction(it.ref.txhash)!! })
+        bigCorpServices.recordTransactions(alicesVault.states.map { aliceServices.validatedTransactions.getTransaction(it.ref.txhash)!! })
 
         // BigCorp™ issues $10,000 of commercial paper, to mature in 30 days, owned initially by itself.
         val faceValue = 10000.DOLLARS `issued by` DUMMY_CASH_ISSUER
         val issuance = bigCorpServices.myInfo.legalIdentity.ref(1)
-        val issueTX: SignedTransaction =
-                CommercialPaper().generateIssue(issuance, faceValue, TEST_TX_TIME + 30.days, DUMMY_NOTARY).apply {
-                    setTime(TEST_TX_TIME, 30.seconds)
-                    signWith(bigCorpServices.key)
-                    signWith(DUMMY_NOTARY_KEY)
-                }.toSignedTransaction()
+        val issueBuilder = CommercialPaper().generateIssue(issuance, faceValue, TEST_TX_TIME + 30.days, DUMMY_NOTARY)
+        issueBuilder.setTimeWindow(TEST_TX_TIME, 30.seconds)
+        val issuePtx = bigCorpServices.signInitialTransaction(issueBuilder)
+        val issueTx = notaryServices.addSignature(issuePtx)
 
-        databaseTransaction(databaseAlice) {
+        databaseAlice.transaction {
             // Alice pays $9000 to BigCorp to own some of their debt.
             moveTX = run {
-                val ptx = TransactionType.General.Builder(DUMMY_NOTARY)
-                aliceVaultService.generateSpend(ptx, 9000.DOLLARS, bigCorpServices.key.public.composite)
-                CommercialPaper().generateMove(ptx, issueTX.tx.outRef(0), aliceServices.key.public.composite)
-                ptx.signWith(bigCorpServices.key)
-                ptx.signWith(aliceServices.key)
-                ptx.signWith(DUMMY_NOTARY_KEY)
-                ptx.toSignedTransaction()
+                val builder = TransactionBuilder(DUMMY_NOTARY)
+                aliceVaultService.generateSpend(builder, 9000.DOLLARS, AnonymousParty(bigCorpServices.key.public))
+                CommercialPaper().generateMove(builder, issueTx.tx.outRef(0), AnonymousParty(aliceServices.key.public))
+                val ptx = aliceServices.signInitialTransaction(builder)
+                val ptx2 = bigCorpServices.addSignature(ptx)
+                val stx = notaryServices.addSignature(ptx2)
+                stx
             }
         }
 
-        databaseTransaction(databaseBigCorp) {
-            fun makeRedeemTX(time: Instant): SignedTransaction {
-                val ptx = TransactionType.General.Builder(DUMMY_NOTARY)
-                ptx.setTime(time, 30.seconds)
-                CommercialPaper().generateRedeem(ptx, moveTX.tx.outRef(1), bigCorpVaultService)
-                ptx.signWith(aliceServices.key)
-                ptx.signWith(bigCorpServices.key)
-                ptx.signWith(DUMMY_NOTARY_KEY)
-                return ptx.toSignedTransaction()
-            }
-
-            val tooEarlyRedemption = makeRedeemTX(TEST_TX_TIME + 10.days)
-            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days)
-
+        databaseBigCorp.transaction {
             // Verify the txns are valid and insert into both sides.
-            listOf(issueTX, moveTX).forEach {
+            listOf(issueTx, moveTX).forEach {
                 it.toLedgerTransaction(aliceServices).verify()
                 aliceServices.recordTransactions(it)
                 bigCorpServices.recordTransactions(it)
             }
+        }
 
+        databaseBigCorp.transaction {
+            fun makeRedeemTX(time: Instant): Pair<SignedTransaction, UUID> {
+                val builder = TransactionBuilder(DUMMY_NOTARY)
+                builder.setTimeWindow(time, 30.seconds)
+                CommercialPaper().generateRedeem(builder, moveTX.tx.outRef(1), bigCorpVaultService)
+                val ptx = aliceServices.signInitialTransaction(builder)
+                val ptx2 = bigCorpServices.addSignature(ptx)
+                val stx = notaryServices.addSignature(ptx2)
+                return Pair(stx, builder.lockId)
+            }
+
+            val redeemTX = makeRedeemTX(TEST_TX_TIME + 10.days)
+            val tooEarlyRedemption = redeemTX.first
+            val tooEarlyRedemptionLockId = redeemTX.second
             val e = assertFailsWith(TransactionVerificationException::class) {
                 tooEarlyRedemption.toLedgerTransaction(aliceServices).verify()
             }
+            // manually release locks held by this failing transaction
+            aliceServices.vaultService.softLockRelease(tooEarlyRedemptionLockId)
             assertTrue(e.cause!!.message!!.contains("paper must have matured"))
 
+            val validRedemption = makeRedeemTX(TEST_TX_TIME + 31.days).first
             validRedemption.toLedgerTransaction(aliceServices).verify()
+            // soft lock not released after success either!!! (as transaction not recorded)
         }
+        resetTestSerialization()
     }
 }

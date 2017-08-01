@@ -2,20 +2,20 @@ package net.corda.node.services.persistence
 
 import com.google.common.primitives.Ints
 import net.corda.core.serialization.SerializedBytes
-import net.corda.core.utilities.LogHelper
 import net.corda.node.services.api.Checkpoint
 import net.corda.node.services.api.CheckpointStorage
 import net.corda.node.services.transactions.PersistentUniquenessProvider
+import net.corda.node.utilities.CordaPersistence
 import net.corda.node.utilities.configureDatabase
-import net.corda.node.utilities.databaseTransaction
+import net.corda.testing.LogHelper
+import net.corda.testing.TestDependencyInjectionBase
 import net.corda.testing.node.makeTestDataSourceProperties
+import net.corda.testing.node.makeTestDatabaseProperties
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatExceptionOfType
-import org.jetbrains.exposed.sql.Database
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
-import java.io.Closeable
 
 internal fun CheckpointStorage.checkpoints(): List<Checkpoint> {
     val checkpoints = mutableListOf<Checkpoint>()
@@ -26,37 +26,34 @@ internal fun CheckpointStorage.checkpoints(): List<Checkpoint> {
     return checkpoints
 }
 
-class DBCheckpointStorageTests {
+class DBCheckpointStorageTests : TestDependencyInjectionBase() {
     lateinit var checkpointStorage: DBCheckpointStorage
-    lateinit var dataSource: Closeable
-    lateinit var database: Database
+    lateinit var database: CordaPersistence
 
     @Before
     fun setUp() {
         LogHelper.setLevel(PersistentUniquenessProvider::class)
-        val dataSourceAndDatabase = configureDatabase(makeTestDataSourceProperties())
-        dataSource = dataSourceAndDatabase.first
-        database = dataSourceAndDatabase.second
+        database = configureDatabase(makeTestDataSourceProperties(), makeTestDatabaseProperties())
         newCheckpointStorage()
     }
 
     @After
     fun cleanUp() {
-        dataSource.close()
+        database.close()
         LogHelper.reset(PersistentUniquenessProvider::class)
     }
 
     @Test
     fun `add new checkpoint`() {
         val checkpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(checkpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(checkpoint)
         }
         newCheckpointStorage()
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(checkpoint)
         }
     }
@@ -64,17 +61,17 @@ class DBCheckpointStorageTests {
     @Test
     fun `remove checkpoint`() {
         val checkpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(checkpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.removeCheckpoint(checkpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).isEmpty()
         }
         newCheckpointStorage()
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).isEmpty()
         }
     }
@@ -83,16 +80,16 @@ class DBCheckpointStorageTests {
     fun `add and remove checkpoint in single commit operate`() {
         val checkpoint = newCheckpoint()
         val checkpoint2 = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(checkpoint)
             checkpointStorage.addCheckpoint(checkpoint2)
             checkpointStorage.removeCheckpoint(checkpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(checkpoint2)
         }
         newCheckpointStorage()
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(checkpoint2)
         }
     }
@@ -100,7 +97,7 @@ class DBCheckpointStorageTests {
     @Test
     fun `remove unknown checkpoint`() {
         val checkpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             assertThatExceptionOfType(IllegalArgumentException::class.java).isThrownBy {
                 checkpointStorage.removeCheckpoint(checkpoint)
             }
@@ -110,21 +107,21 @@ class DBCheckpointStorageTests {
     @Test
     fun `add two checkpoints then remove first one`() {
         val firstCheckpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(firstCheckpoint)
         }
         val secondCheckpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(secondCheckpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.removeCheckpoint(firstCheckpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(secondCheckpoint)
         }
         newCheckpointStorage()
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).containsExactly(secondCheckpoint)
         }
     }
@@ -132,26 +129,26 @@ class DBCheckpointStorageTests {
     @Test
     fun `add checkpoint and then remove after 'restart'`() {
         val originalCheckpoint = newCheckpoint()
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.addCheckpoint(originalCheckpoint)
         }
         newCheckpointStorage()
-        val reconstructedCheckpoint = databaseTransaction(database) {
+        val reconstructedCheckpoint = database.transaction {
             checkpointStorage.checkpoints().single()
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(reconstructedCheckpoint).isEqualTo(originalCheckpoint).isNotSameAs(originalCheckpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage.removeCheckpoint(reconstructedCheckpoint)
         }
-        databaseTransaction(database) {
+        database.transaction {
             assertThat(checkpointStorage.checkpoints()).isEmpty()
         }
     }
 
     private fun newCheckpointStorage() {
-        databaseTransaction(database) {
+        database.transaction {
             checkpointStorage = DBCheckpointStorage()
         }
     }

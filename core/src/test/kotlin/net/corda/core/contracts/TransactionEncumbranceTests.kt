@@ -1,13 +1,12 @@
 package net.corda.core.contracts
 
 import net.corda.contracts.asset.Cash
-import net.corda.core.crypto.CompositeKey
 import net.corda.core.crypto.SecureHash
-import net.corda.core.utilities.DUMMY_PUBKEY_1
-import net.corda.core.utilities.DUMMY_PUBKEY_2
+import net.corda.core.identity.AbstractParty
+import net.corda.core.transactions.LedgerTransaction
 import net.corda.testing.MEGA_CORP
+import net.corda.testing.MINI_CORP
 import net.corda.testing.ledger
-import net.corda.testing.transaction
 import org.junit.Test
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -19,28 +18,28 @@ class TransactionEncumbranceTests {
 
     val state = Cash.State(
             amount = 1000.DOLLARS `issued by` defaultIssuer,
-            owner = DUMMY_PUBKEY_1
+            owner = MEGA_CORP
     )
-    val stateWithNewOwner = state.copy(owner = DUMMY_PUBKEY_2)
+    val stateWithNewOwner = state.copy(owner = MINI_CORP)
 
-    val FOUR_PM = Instant.parse("2015-04-17T16:00:00.00Z")
-    val FIVE_PM = FOUR_PM.plus(1, ChronoUnit.HOURS)
+    val FOUR_PM: Instant = Instant.parse("2015-04-17T16:00:00.00Z")
+    val FIVE_PM: Instant = FOUR_PM.plus(1, ChronoUnit.HOURS)
     val timeLock = DummyTimeLock.State(FIVE_PM)
 
     class DummyTimeLock : Contract {
         override val legalContractReference = SecureHash.sha256("DummyTimeLock")
-        override fun verify(tx: TransactionForContract) {
-            val timeLockInput = tx.inputs.filterIsInstance<State>().singleOrNull() ?: return
-            val time = tx.timestamp?.before ?: throw IllegalArgumentException("Transactions containing time-locks must be timestamped")
+        override fun verify(tx: LedgerTransaction) {
+            val timeLockInput = tx.inputsOfType<State>().singleOrNull() ?: return
+            val time = tx.timeWindow?.untilTime ?: throw IllegalArgumentException("Transactions containing time-locks must have a time-window")
             requireThat {
-                "the time specified in the time-lock has passed" by (time >= timeLockInput.validFrom)
+                "the time specified in the time-lock has passed" using (time >= timeLockInput.validFrom)
             }
         }
 
         data class State(
                 val validFrom: Instant
         ) : ContractState {
-            override val participants: List<CompositeKey> = emptyList()
+            override val participants: List<AbstractParty> = emptyList()
             override val contract: Contract = TEST_TIMELOCK_ID
         }
     }
@@ -52,7 +51,7 @@ class TransactionEncumbranceTests {
                 input { state }
                 output(encumbrance = 1) { stateWithNewOwner }
                 output("5pm time-lock") { timeLock }
-                command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
                 verifies()
             }
         }
@@ -70,8 +69,8 @@ class TransactionEncumbranceTests {
                 input("state encumbered by 5pm time-lock")
                 input("5pm time-lock")
                 output { stateWithNewOwner }
-                command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-                timestamp(FIVE_PM)
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                timeWindow(FIVE_PM)
                 verifies()
             }
         }
@@ -89,8 +88,8 @@ class TransactionEncumbranceTests {
                 input("state encumbered by 5pm time-lock")
                 input("5pm time-lock")
                 output { state }
-                command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-                timestamp(FOUR_PM)
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                timeWindow(FOUR_PM)
                 this `fails with` "the time specified in the time-lock has passed"
             }
         }
@@ -106,8 +105,8 @@ class TransactionEncumbranceTests {
             transaction {
                 input("state encumbered by 5pm time-lock")
                 output { stateWithNewOwner }
-                command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-                timestamp(FIVE_PM)
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                timeWindow(FIVE_PM)
                 this `fails with` "Missing required encumbrance 1 in INPUT"
             }
         }
@@ -115,22 +114,26 @@ class TransactionEncumbranceTests {
 
     @Test
     fun `state cannot be encumbered by itself`() {
-        transaction {
-            input { state }
-            output(encumbrance = 0) { stateWithNewOwner }
-            command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-            this `fails with` "Missing required encumbrance 0 in OUTPUT"
+        ledger {
+            transaction {
+                input { state }
+                output(encumbrance = 0) { stateWithNewOwner }
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                this `fails with` "Missing required encumbrance 0 in OUTPUT"
+            }
         }
     }
 
     @Test
     fun `encumbrance state index must be valid`() {
-        transaction {
-            input { state }
-            output(encumbrance = 2) { stateWithNewOwner }
-            output { timeLock }
-            command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-            this `fails with` "Missing required encumbrance 2 in OUTPUT"
+        ledger {
+            transaction {
+                input { state }
+                output(encumbrance = 2) { stateWithNewOwner }
+                output { timeLock }
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                this `fails with` "Missing required encumbrance 2 in OUTPUT"
+            }
         }
     }
 
@@ -146,8 +149,8 @@ class TransactionEncumbranceTests {
                 input("state encumbered by some other state")
                 input("5pm time-lock")
                 output { stateWithNewOwner }
-                command(DUMMY_PUBKEY_1) { Cash.Commands.Move() }
-                timestamp(FIVE_PM)
+                command(MEGA_CORP.owningKey) { Cash.Commands.Move() }
+                timeWindow(FIVE_PM)
                 this `fails with` "Missing required encumbrance 1 in INPUT"
             }
         }

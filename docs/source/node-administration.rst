@@ -39,9 +39,13 @@ not require any particular network protocol for export. So this data can be expo
 some monitoring systems provide a "Java Agent", which is essentially a JVM plugin that finds all the MBeans and sends
 them out to a statistics collector over the network. For those systems, follow the instructions provided by the vendor.
 
-Sometimes though, you just want raw access to the data and operations itself. So nodes export them over HTTP on the
-``/monitoring/json`` HTTP endpoint, using a program called `Jolokia <https://jolokia.org/>`_. Jolokia defines the JSON
-and REST formats for accessing MBeans, and provides client libraries to work with that protocol as well.
+.. warning:: As of Corda M11, Java serialisation in the Corda node has been restricted, meaning MBeans access via the JMX
+             port will no longer work. Please use java agents instead, you can find details on how to use Jolokia JVM
+             agent `here <https://jolokia.org/agent/jvm.html>`_.
+
+`Jolokia <https://jolokia.org/>`_ allows you to access the raw data and operations without connecting to the JMX port
+directly. The nodes export the data over HTTP on the ``/jolokia`` HTTP endpoint, Jolokia defines the JSON and REST
+formats for accessing MBeans, and provides client libraries to work with that protocol as well.
 
 Here are a few ways to build dashboards and extract monitoring data for a node:
 
@@ -51,12 +55,11 @@ Here are a few ways to build dashboards and extract monitoring data for a node:
 * `JMXTrans <https://github.com/jmxtrans/jmxtrans>`_ is another tool for Graphite, this time, it's got its own agent
   (JVM plugin) which reads a custom config file and exports only the named data. It's more configurable than
   JMX2Graphite and doesn't require a separate process, as the JVM will write directly to Graphite.
-* *Java Mission Control* is a desktop app that can connect to a target JVM that has the right command line flags set
-  (or always, if running locally). You can explore what data is available, create graphs of those metrics, and invoke
-  management operations like forcing a garbage collection.
-* *VisualVM* is another desktop app that can do fine grained JVM monitoring and sampling. Very useful during development.
 * Cloud metrics services like New Relic also understand JMX, typically, by providing their own agent that uploads the
   data to their service on a regular schedule.
+* `Telegraf <https://github.com/influxdata/telegraf>`_ is a tool to collect, process, aggregate, and write metrics.
+  It can bridge any data input to any output using their plugin system, for example, Telegraf can
+  be configured to collect data from Jolokia and write to DataDog web api.
 
 Memory usage and tuning
 -----------------------
@@ -75,60 +78,3 @@ node is running out of memory, you can give it more by running the node like thi
 The example command above would give a 1 gigabyte Java heap.
 
 .. note:: Unfortunately the JVM does not let you limit the total memory usage of Java program, just the heap size.
-
-Uploading and downloading attachments
--------------------------------------
-
-Attachments are files that add context to and influence the behaviour of transactions. They are always identified by
-hash and they are public, in that they propagate through the network to wherever they are needed.
-
-All attachments are zip files. Thus to upload a file to the ledger you must first wrap it into a zip (or jar) file. Then
-you can upload it by running this command from a UNIX terminal:
-
-.. sourcecode:: shell
-
-   curl -F myfile=@path/to/my/file.zip http://localhost:31338/upload/attachment
-
-The attachment will be identified by the SHA-256 hash of the contents, which you can get by doing:
-
-.. sourcecode:: shell
-
-   shasum -a 256 file.zip
-
-on a Mac or by using ``sha256sum`` on Linux. Alternatively, the hash will be returned to you when you upload the
-attachment.
-
-An attachment may be downloaded by fetching:
-
-.. sourcecode:: shell
-
-   http://localhost:31338/attachments/DECD098666B9657314870E192CED0C3519C2C9D395507A238338F8D003929DE9
-
-where DECD... is of course replaced with the hash identifier of your own attachment. Because attachments are always
-containers, you can also fetch a specific file within the attachment by appending its path, like this:
-
-.. sourcecode:: shell
-
-   http://localhost:31338/attachments/DECD098666B9657314870E192CED0C3519C2C9D395507A238338F8D003929DE9/path/within/zip.txt
-
-Uploading interest rate fixes
------------------------------
-
-If you would like to operate an interest rate fixing service (oracle), you can upload fix data by uploading data in
-a simple text format to the ``/upload/interest-rates`` path on the web server.
-
-The file looks like this::
-
-    # Some pretend noddy rate fixes, for the interest rate oracles.
-
-    LIBOR 2016-03-16 1M = 0.678
-    LIBOR 2016-03-16 2M = 0.655
-    EURIBOR 2016-03-15 1M = 0.123
-    EURIBOR 2016-03-15 2M = 0.111
-
-The columns are:
-
-* Name of the fix
-* Date of the fix
-* The tenor / time to maturity in days
-* The interest rate itself

@@ -68,7 +68,7 @@ We start by defining the ``CommercialPaper`` class. As in the previous tutorial,
         class CommercialPaper : Contract {
             override val legalContractReference: SecureHash = SecureHash.sha256("https://en.wikipedia.org/wiki/Commercial_paper")
 
-            override fun verify(tx: TransactionForContract) = verifyClause(tx, Clauses.Group(), tx.commands.select<Commands>())
+            override fun verify(tx: LedgerTransaction) = verifyClause(tx, Clauses.Group(), tx.commands.select<Commands>())
 
             interface Commands : CommandData {
                 data class Move(override val contractHash: SecureHash? = null) : FungibleAsset.Commands.Move, Commands
@@ -85,7 +85,7 @@ We start by defining the ``CommercialPaper`` class. As in the previous tutorial,
           }
 
           @Override
-          public void verify(@NotNull TransactionForContract tx) throws IllegalArgumentException {
+          public void verify(@NotNull LedgerTransaction tx) throws IllegalArgumentException {
               ClauseVerifier.verifyClause(tx, new Clauses.Group(), extractCommands(tx));
           }
 
@@ -128,7 +128,7 @@ and is included in the ``CommercialPaper.kt`` code.
                 override val requiredCommands: Set<Class<out CommandData>>
                     get() = setOf(Commands.Move::class.java)
 
-                override fun verify(tx: TransactionForContract,
+                override fun verify(tx: LedgerTransaction,
                                 inputs: List<State>,
                                 outputs: List<State>,
                                 commands: List<AuthenticatedObject<Commands>>,
@@ -136,8 +136,8 @@ and is included in the ``CommercialPaper.kt`` code.
                     val command = commands.requireSingleCommand<Commands.Move>()
                     val input = inputs.single()
                     requireThat {
-                        "the transaction is signed by the owner of the CP" by (input.owner in command.signers)
-                        "the state is propagated" by (outputs.size == 1)
+                        "the transaction is signed by the owner of the CP" using (input.owner.owningKey in command.signers)
+                        "the state is propagated" using (outputs.size == 1)
                         // Don't need to check anything else, as if outputs.size == 1 then the output is equal to
                         // the input ignoring the owner field due to the grouping.
                     }
@@ -158,7 +158,7 @@ and is included in the ``CommercialPaper.kt`` code.
 
                 @NotNull
                 @Override
-                public Set<Commands> verify(@NotNull TransactionForContract tx,
+                public Set<Commands> verify(@NotNull LedgerTransaction tx,
                                                @NotNull List<? extends State> inputs,
                                                @NotNull List<? extends State> outputs,
                                                @NotNull List<? extends AuthenticatedObject<? extends Commands>> commands,
@@ -167,7 +167,7 @@ and is included in the ``CommercialPaper.kt`` code.
                     // There should be only a single input due to aggregation above
                     State input = single(inputs);
 
-                    if (!cmd.getSigners().contains(input.getOwner()))
+                    if (!cmd.getSigners().contains(input.getOwner().getOwningKey()))
                         throw new IllegalStateException("Failed requirement: the transaction is signed by the owner of the CP");
 
                     // Check the output CP state is the same as the input state, ignoring the owner field.
@@ -229,7 +229,7 @@ its subclauses (wrapped move, issue, redeem). "Any" in this case means that it w
                 Redeem(),
                 Move(),
                 Issue())) {
-            override fun groupStates(tx: TransactionForContract): List<TransactionForContract.InOutGroup<State, Issued<Terms>>>
+            override fun groupStates(tx: LedgerTransaction): List<LedgerTransaction.InOutGroup<State, Issued<Terms>>>
                     = tx.groupStates<State, Issued<Terms>> { it.token }
         }
 
@@ -246,7 +246,7 @@ its subclauses (wrapped move, issue, redeem). "Any" in this case means that it w
 
             @NotNull
             @Override
-            public List<InOutGroup<State, State>> groupStates(@NotNull TransactionForContract tx) {
+            public List<InOutGroup<State, State>> groupStates(@NotNull LedgerTransaction tx) {
                 return tx.groupStates(State.class, State::withoutOwner);
             }
         }

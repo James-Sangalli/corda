@@ -1,12 +1,12 @@
 package net.corda.node.services.persistence
 
-import net.corda.core.ThreadBox
-import net.corda.core.bufferUntilSubscribed
+import net.corda.core.internal.ThreadBox
+import net.corda.core.internal.bufferUntilSubscribed
 import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.StateMachineRunId
-import net.corda.core.node.services.StateMachineRecordedTransactionMappingStorage
-import net.corda.core.node.services.StateMachineTransactionMapping
-import rx.Observable
+import net.corda.core.messaging.DataFeed
+import net.corda.core.messaging.StateMachineTransactionMapping
+import net.corda.node.services.api.StateMachineRecordedTransactionMappingStorage
 import rx.subjects.PublishSubject
 import java.util.*
 import javax.annotation.concurrent.ThreadSafe
@@ -18,11 +18,11 @@ import javax.annotation.concurrent.ThreadSafe
  */
 @ThreadSafe
 class InMemoryStateMachineRecordedTransactionMappingStorage : StateMachineRecordedTransactionMappingStorage {
-
-    private val mutex = ThreadBox(object {
+    private class InnerState {
         val stateMachineTransactionMap = HashMap<StateMachineRunId, HashSet<SecureHash>>()
-        val updates = PublishSubject.create<StateMachineTransactionMapping>()
-    })
+        val updates = PublishSubject.create<StateMachineTransactionMapping>()!!
+    }
+    private val mutex = ThreadBox(InnerState())
 
     override fun addMapping(stateMachineRunId: StateMachineRunId, transactionId: SecureHash) {
         mutex.locked {
@@ -32,9 +32,9 @@ class InMemoryStateMachineRecordedTransactionMappingStorage : StateMachineRecord
     }
 
     override fun track():
-            Pair<List<StateMachineTransactionMapping>, Observable<StateMachineTransactionMapping>> {
+            DataFeed<List<StateMachineTransactionMapping>, StateMachineTransactionMapping> {
         mutex.locked {
-            return Pair(
+            return DataFeed(
                     stateMachineTransactionMap.flatMap { entry ->
                         entry.value.map {
                             StateMachineTransactionMapping(entry.key, it)

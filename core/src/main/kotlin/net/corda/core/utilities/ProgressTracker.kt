@@ -1,9 +1,8 @@
 package net.corda.core.utilities
 
-import net.corda.core.TransientProperty
+import net.corda.core.serialization.CordaSerializable
 import rx.Observable
 import rx.Subscription
-import rx.subjects.BehaviorSubject
 import rx.subjects.PublishSubject
 import java.util.*
 
@@ -32,38 +31,34 @@ import java.util.*
  * A progress tracker is *not* thread safe. You may move events from the thread making progress to another thread by
  * using the [Observable] subscribeOn call.
  */
+@CordaSerializable
 class ProgressTracker(vararg steps: Step) {
+    @CordaSerializable
     sealed class Change {
-        class Position(val tracker: ProgressTracker, val newStep: Step) : Change() {
+        data class Position(val tracker: ProgressTracker, val newStep: Step) : Change() {
             override fun toString() = newStep.label
         }
 
-        class Rendering(val tracker: ProgressTracker, val ofStep: Step) : Change() {
+        data class Rendering(val tracker: ProgressTracker, val ofStep: Step) : Change() {
             override fun toString() = ofStep.label
         }
 
-        class Structural(val tracker: ProgressTracker, val parent: Step) : Change() {
+        data class Structural(val tracker: ProgressTracker, val parent: Step) : Change() {
             override fun toString() = "Structural step change in child of ${parent.label}"
         }
     }
 
     /** The superclass of all step objects. */
+    @CordaSerializable
     open class Step(open val label: String) {
         open val changes: Observable<Change> get() = Observable.empty()
         open fun childProgressTracker(): ProgressTracker? = null
-    }
-
-    /** This class makes it easier to relabel a step on the fly, to provide transient information. */
-    open inner class RelabelableStep(currentLabel: String) : Step(currentLabel) {
-        override val changes: BehaviorSubject<Change> = BehaviorSubject.create()
-
-        var currentLabel: String = currentLabel
-            set(value) {
-                field = value
-                changes.onNext(ProgressTracker.Change.Rendering(this@ProgressTracker, this@RelabelableStep))
-            }
-
-        override val label: String get() = currentLabel
+        /**
+         * A flow may populate this property with flow specific context data.
+         * The extra data will be recorded to the audit logs when the flow progresses.
+         * Even if empty the basic details (i.e. label) of the step will be recorded for audit purposes.
+         */
+        open val extraAuditData: Map<String, String> get() = emptyMap()
     }
 
     // Sentinel objects. Overrides equals() to survive process restarts and serialization.
@@ -79,11 +74,12 @@ class ProgressTracker(vararg steps: Step) {
     val steps = arrayOf(UNSTARTED, *steps, DONE)
 
     // This field won't be serialized.
-    private val _changes by TransientProperty { PublishSubject.create<Change>() }
+    private val _changes by transient { PublishSubject.create<Change>() }
 
+    @CordaSerializable
     private data class Child(val tracker: ProgressTracker, @Transient val subscription: Subscription?)
 
-    private val childProgressTrackers = HashMap<Step, Child>()
+    private val childProgressTrackers = mutableMapOf<Step, Child>()
 
     init {
         steps.forEach {
@@ -122,7 +118,7 @@ class ProgressTracker(vararg steps: Step) {
             curChangeSubscription?.unsubscribe()
             stepIndex = index
             _changes.onNext(Change.Position(this, steps[index]))
-            curChangeSubscription = currentStep.changes.subscribe( { _changes.onNext(it) }, { _changes.onError(it) })
+            curChangeSubscription = currentStep.changes.subscribe({ _changes.onNext(it) }, { _changes.onError(it) })
 
             if (currentStep == DONE) _changes.onCompleted()
         }

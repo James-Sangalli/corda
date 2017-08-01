@@ -1,25 +1,29 @@
 package net.corda.node
 
+import co.paralleluniverse.fibers.Suspendable
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.*
+import net.corda.core.crypto.isFulfilledBy
+import net.corda.core.crypto.keys
+import net.corda.core.flows.FlowLogic
 import net.corda.core.flows.StateMachineRunId
-import net.corda.core.messaging.StateMachineUpdate
-import net.corda.core.messaging.startFlow
+import net.corda.core.getOrThrow
+import net.corda.core.messaging.*
 import net.corda.core.node.services.ServiceInfo
 import net.corda.core.node.services.Vault
 import net.corda.core.node.services.unconsumedStates
-import net.corda.core.serialization.OpaqueBytes
 import net.corda.core.transactions.SignedTransaction
+import net.corda.core.utilities.OpaqueBytes
 import net.corda.flows.CashIssueFlow
 import net.corda.flows.CashPaymentFlow
 import net.corda.node.internal.CordaRPCOpsImpl
-import net.corda.node.services.User
-import net.corda.node.services.messaging.CURRENT_RPC_USER
-import net.corda.node.services.messaging.PermissionException
+import net.corda.node.services.messaging.CURRENT_RPC_CONTEXT
+import net.corda.node.services.messaging.RpcContext
 import net.corda.node.services.network.NetworkMapService
 import net.corda.node.services.startFlowPermission
 import net.corda.node.services.transactions.SimpleNotaryService
-import net.corda.node.utilities.databaseTransaction
+import net.corda.nodeapi.PermissionException
+import net.corda.nodeapi.User
 import net.corda.testing.expect
 import net.corda.testing.expectEvents
 import net.corda.testing.node.MockNetwork
@@ -27,13 +31,15 @@ import net.corda.testing.node.MockNetwork.MockNode
 import net.corda.testing.sequence
 import org.apache.commons.io.IOUtils
 import org.assertj.core.api.Assertions.assertThatExceptionOfType
+import org.junit.After
+import org.junit.Assert.assertArrayEquals
 import org.junit.Before
 import org.junit.Test
 import rx.Observable
 import java.io.ByteArrayOutputStream
-import java.util.*
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertTrue
 
 class CordaRPCOpsImplTest {
 
@@ -41,31 +47,38 @@ class CordaRPCOpsImplTest {
         val testJar = "net/corda/node/testing/test.jar"
     }
 
-    lateinit var network: MockNetwork
+    lateinit var mockNet: MockNetwork
     lateinit var aliceNode: MockNode
     lateinit var notaryNode: MockNode
-    lateinit var rpc: CordaRPCOpsImpl
+    lateinit var rpc: CordaRPCOps
     lateinit var stateMachineUpdates: Observable<StateMachineUpdate>
     lateinit var transactions: Observable<SignedTransaction>
-    lateinit var vaultUpdates: Observable<Vault.Update>
+    lateinit var vaultUpdates: Observable<Vault.Update<ContractState>>             // TODO: deprecated
+    lateinit var vaultTrackCash: Observable<Vault.Update<Cash.State>>
 
     @Before
     fun setup() {
-        network = MockNetwork()
-        val networkMap = network.createNode(advertisedServices = ServiceInfo(NetworkMapService.type))
-        aliceNode = network.createNode(networkMapAddress = networkMap.info.address)
-        notaryNode = network.createNode(advertisedServices = ServiceInfo(SimpleNotaryService.type), networkMapAddress = networkMap.info.address)
+        mockNet = MockNetwork()
+        val networkMap = mockNet.createNode(advertisedServices = ServiceInfo(NetworkMapService.type))
+        aliceNode = mockNet.createNode(networkMapAddress = networkMap.network.myAddress)
+        notaryNode = mockNet.createNode(advertisedServices = ServiceInfo(SimpleNotaryService.type), networkMapAddress = networkMap.network.myAddress)
         rpc = CordaRPCOpsImpl(aliceNode.services, aliceNode.smm, aliceNode.database)
-        CURRENT_RPC_USER.set(User("user", "pwd", permissions = setOf(
+        CURRENT_RPC_CONTEXT.set(RpcContext(User("user", "pwd", permissions = setOf(
                 startFlowPermission<CashIssueFlow>(),
                 startFlowPermission<CashPaymentFlow>()
-        )))
+        ))))
 
-        databaseTransaction(aliceNode.database) {
-            stateMachineUpdates = rpc.stateMachinesAndUpdates().second
-            transactions = rpc.verifiedTransactions().second
-            vaultUpdates = rpc.vaultAndUpdates().second
+        aliceNode.database.transaction {
+            stateMachineUpdates = rpc.stateMachinesFeed().updates
+            transactions = rpc.verifiedTransactionsFeed().updates
+            vaultUpdates = rpc.vaultAndUpdates().updates
+            vaultTrackCash = rpc.vaultTrackBy<Cash.State>().updates
         }
+    }
+
+    @After
+    fun cleanUp() {
+        mockNet.stopNodes()
     }
 
     @Test
@@ -74,18 +87,15 @@ class CordaRPCOpsImplTest {
         val ref = OpaqueBytes(ByteArray(1) { 1 })
 
         // Check the monitoring service wallet is empty
-        databaseTransaction(aliceNode.database) {
+        aliceNode.database.transaction {
             assertFalse(aliceNode.services.vaultService.unconsumedStates<ContractState>().iterator().hasNext())
         }
 
         // Tell the monitoring service node to issue some cash
+        val anonymous = false
         val recipient = aliceNode.info.legalIdentity
-        rpc.startFlow(::CashIssueFlow, Amount(quantity, GBP), ref, recipient, notaryNode.info.notaryIdentity)
-        network.runNetwork()
-
-        val expectedState = Cash.State(Amount(quantity,
-                Issued(aliceNode.info.legalIdentity.ref(ref), GBP)),
-                recipient.owningKey)
+        val result = rpc.startFlow(::CashIssueFlow, Amount(quantity, GBP), ref, recipient, notaryNode.info.notaryIdentity, anonymous)
+        mockNet.runNetwork()
 
         var issueSmId: StateMachineRunId? = null
         stateMachineUpdates.expectEvents {
@@ -100,13 +110,24 @@ class CordaRPCOpsImplTest {
             )
         }
 
-        transactions.expectEvents {
-            expect { tx ->
-                assertEquals(expectedState, tx.tx.outputs.single().data)
+        result.returnValue.getOrThrow()
+        val expectedState = Cash.State(Amount(quantity,
+                Issued(aliceNode.info.legalIdentity.ref(ref), GBP)),
+                recipient)
+
+        // Query vault via RPC
+        val cash = rpc.vaultQueryBy<Cash.State>()
+        assertEquals(expectedState, cash.states.first().state.data)
+
+        // TODO: deprecated
+        vaultUpdates.expectEvents {
+            expect { update ->
+                val actual = update.produced.single().state.data
+                assertEquals(expectedState, actual)
             }
         }
 
-        vaultUpdates.expectEvents {
+        vaultTrackCash.expectEvents {
             expect { update ->
                 val actual = update.produced.single().state.data
                 assertEquals(expectedState, actual)
@@ -116,22 +137,20 @@ class CordaRPCOpsImplTest {
 
     @Test
     fun `issue and move`() {
-
-        rpc.startFlow(::CashIssueFlow,
-                Amount(100, USD),
+        val anonymous = false
+        val result = rpc.startFlow(::CashIssueFlow,
+                100.DOLLARS,
                 OpaqueBytes(ByteArray(1, { 1 })),
                 aliceNode.info.legalIdentity,
-                notaryNode.info.notaryIdentity
+                notaryNode.info.notaryIdentity,
+                false
         )
 
-        network.runNetwork()
+        mockNet.runNetwork()
 
-        rpc.startFlow(::CashPaymentFlow,
-                Amount(100, Issued(PartyAndReference(aliceNode.info.legalIdentity, OpaqueBytes(ByteArray(1, { 1 }))), USD)),
-                aliceNode.info.legalIdentity
-        )
+        rpc.startFlow(::CashPaymentFlow, 100.DOLLARS, aliceNode.info.legalIdentity, anonymous)
 
-        network.runNetwork()
+        mockNet.runNetwork()
 
         var issueSmId: StateMachineRunId? = null
         var moveSmId: StateMachineRunId? = null
@@ -154,23 +173,24 @@ class CordaRPCOpsImplTest {
             )
         }
 
+        val tx = result.returnValue.getOrThrow()
         transactions.expectEvents {
             sequence(
                     // ISSUE
-                    expect { tx ->
-                        require(tx.tx.inputs.isEmpty())
-                        require(tx.tx.outputs.size == 1)
-                        val signaturePubKeys = tx.sigs.map { it.by }.toSet()
+                    expect { stx ->
+                        require(stx.tx.inputs.isEmpty())
+                        require(stx.tx.outputs.size == 1)
+                        val signaturePubKeys = stx.sigs.map { it.by }.toSet()
                         // Only Alice signed
                         val aliceKey = aliceNode.info.legalIdentity.owningKey
                         require(signaturePubKeys.size <= aliceKey.keys.size)
                         require(aliceKey.isFulfilledBy(signaturePubKeys))
                     },
                     // MOVE
-                    expect { tx ->
-                        require(tx.tx.inputs.size == 1)
-                        require(tx.tx.outputs.size == 1)
-                        val signaturePubKeys = tx.sigs.map { it.by }.toSet()
+                    expect { stx ->
+                        require(stx.tx.inputs.size == 1)
+                        require(stx.tx.outputs.size == 1)
+                        val signaturePubKeys = stx.sigs.map { it.by }.toSet()
                         // Alice and Notary signed
                         require(aliceNode.info.legalIdentity.owningKey.isFulfilledBy(signaturePubKeys))
                         require(notaryNode.info.notaryIdentity.owningKey.isFulfilledBy(signaturePubKeys))
@@ -178,17 +198,33 @@ class CordaRPCOpsImplTest {
             )
         }
 
+        // TODO: deprecated
         vaultUpdates.expectEvents {
             sequence(
                     // ISSUE
-                    expect { update ->
-                        require(update.consumed.size == 0) { update.consumed.size }
-                        require(update.produced.size == 1) { update.produced.size }
+                    expect { (consumed, produced) ->
+                        require(consumed.isEmpty()) { consumed.size }
+                        require(produced.size == 1) { produced.size }
                     },
                     // MOVE
-                    expect { update ->
-                        require(update.consumed.size == 1) { update.consumed.size }
-                        require(update.produced.size == 1) { update.produced.size }
+                    expect { (consumed, produced) ->
+                        require(consumed.size == 1) { consumed.size }
+                        require(produced.size == 1) { produced.size }
+                    }
+            )
+        }
+
+        vaultTrackCash.expectEvents {
+            sequence(
+                    // ISSUE
+                    expect { (consumed, produced) ->
+                        require(consumed.isEmpty()) { consumed.size }
+                        require(produced.size == 1) { produced.size }
+                    },
+                    // MOVE
+                    expect { (consumed, produced) ->
+                        require(consumed.size == 1) { consumed.size }
+                        require(produced.size == 1) { produced.size }
                     }
             )
         }
@@ -196,13 +232,14 @@ class CordaRPCOpsImplTest {
 
     @Test
     fun `cash command by user not permissioned for cash`() {
-        CURRENT_RPC_USER.set(User("user", "pwd", permissions = emptySet()))
+        CURRENT_RPC_CONTEXT.set(RpcContext(User("user", "pwd", permissions = emptySet())))
         assertThatExceptionOfType(PermissionException::class.java).isThrownBy {
             rpc.startFlow(::CashIssueFlow,
                     Amount(100, USD),
                     OpaqueBytes(ByteArray(1, { 1 })),
                     aliceNode.info.legalIdentity,
-                    notaryNode.info.notaryIdentity
+                    notaryNode.info.notaryIdentity,
+                    false
             )
         }
     }
@@ -211,7 +248,7 @@ class CordaRPCOpsImplTest {
     fun `can upload an attachment`() {
         val inputJar = Thread.currentThread().contextClassLoader.getResourceAsStream(testJar)
         val secureHash = rpc.uploadAttachment(inputJar)
-        assert(rpc.attachmentExists(secureHash))
+        assertTrue(rpc.attachmentExists(secureHash))
     }
 
     @Test
@@ -224,6 +261,21 @@ class CordaRPCOpsImplTest {
         IOUtils.copy(Thread.currentThread().contextClassLoader.getResourceAsStream(testJar), bufferFile)
         IOUtils.copy(rpc.openAttachment(secureHash), bufferRpc)
 
-        assert(Arrays.equals(bufferFile.toByteArray(), bufferRpc.toByteArray()))
+        assertArrayEquals(bufferFile.toByteArray(), bufferRpc.toByteArray())
+    }
+
+    @Test
+    fun `attempt to start non-RPC flow`() {
+        CURRENT_RPC_CONTEXT.set(RpcContext(User("user", "pwd", permissions = setOf(
+                startFlowPermission<NonRPCFlow>()
+        ))))
+        assertThatExceptionOfType(IllegalArgumentException::class.java).isThrownBy {
+            rpc.startFlow(::NonRPCFlow)
+        }
+    }
+
+    class NonRPCFlow : FlowLogic<Unit>() {
+        @Suspendable
+        override fun call() = Unit
     }
 }

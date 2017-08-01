@@ -2,10 +2,11 @@ package net.corda.loadtest
 
 import com.typesafe.config.ConfigFactory
 import com.typesafe.config.ConfigParseOptions
+import net.corda.loadtest.tests.StabilityTest
 import net.corda.loadtest.tests.crossCashTest
 import net.corda.loadtest.tests.selfIssueTest
+import net.corda.nodeapi.config.parseAs
 import java.io.File
-import java.nio.file.Paths
 
 /**
  * This is how load testing works:
@@ -34,6 +35,11 @@ import java.nio.file.Paths
  *   disruption is basically an infinite loop of wait->mess something up->repeat. Invariants should hold under these
  *   conditions as well.
  *
+ * Configuration:
+ *   The load test will look for configuration in location provided by the program argument, or the configuration can be
+ *   provided via system properties using vm arguments, e.g. -Dloadtest.nodeHosts.0="host" see [LoadTestConfiguration] for
+ *   list of configurable properties.
+ *
  * Diagnostic:
  *   TODO currently the diagnostic is quite poor, all we can say is that the predicted state is different from the real
  *   one, or that some piece of work failed to execute in some state. Logs need to be checked manually.
@@ -44,34 +50,33 @@ import java.nio.file.Paths
  */
 
 fun main(args: Array<String>) {
-
-    if (args.isEmpty()) {
-        throw IllegalArgumentException("Usage: <binary> PATH_TO_CONFIG")
+    val customConfig = if (args.isNotEmpty()) {
+        ConfigFactory.parseFile(File(args[0]), ConfigParseOptions.defaults().setAllowMissing(false))
+    } else {
+        // This allow us to provide some configurations via teamcity.
+        ConfigFactory.parseProperties(System.getProperties()).getConfig("loadtest")
     }
     val defaultConfig = ConfigFactory.parseResources("loadtest-reference.conf", ConfigParseOptions.defaults().setAllowMissing(false))
-    val customConfig = ConfigFactory.parseFile(File(args[0]), ConfigParseOptions.defaults().setAllowMissing(false))
     val resolvedConfig = customConfig.withFallback(defaultConfig).resolve()
-
-    val loadTestConfiguration = LoadTestConfiguration(
-            sshUser = if (resolvedConfig.hasPath("sshUser")) resolvedConfig.getString("sshUser") else System.getProperty("user.name"),
-            localCertificatesBaseDirectory = Paths.get(resolvedConfig.getString("localCertificatesBaseDirectory")),
-            localTunnelStartingPort = resolvedConfig.getInt("localTunnelStartingPort"),
-            nodeHosts = resolvedConfig.getStringList("nodeHosts"),
-            remoteNodeDirectory = Paths.get("/opt/r3cev"),
-            remoteMessagingPort = 31337,
-            remoteSystemdServiceName = "r3cev-node",
-            seed = if (resolvedConfig.hasPath("seed")) resolvedConfig.getLong("seed") else null
-    )
+    val loadTestConfiguration = resolvedConfig.parseAs<LoadTestConfiguration>()
 
     if (loadTestConfiguration.nodeHosts.isEmpty()) {
         throw IllegalArgumentException("Please specify at least one node host")
     }
 
+    when (loadTestConfiguration.mode) {
+        TestMode.LOAD_TEST -> runLoadTest(loadTestConfiguration)
+        TestMode.STABILITY_TEST -> runStabilityTest(loadTestConfiguration)
+    }
+}
+
+private fun runLoadTest(loadTestConfiguration: LoadTestConfiguration) {
     runLoadTests(loadTestConfiguration, listOf(
             selfIssueTest to LoadTest.RunParameters(
                     parallelism = 100,
                     generateCount = 10000,
                     clearDatabaseBeforeRun = false,
+                    executionFrequency = 1000,
                     gatherFrequency = 1000,
                     disruptionPatterns = listOf(
                             listOf(), // no disruptions
@@ -99,7 +104,8 @@ fun main(args: Array<String>) {
             crossCashTest to LoadTest.RunParameters(
                     parallelism = 4,
                     generateCount = 2000,
-                    clearDatabaseBeforeRun = true,
+                    clearDatabaseBeforeRun = false,
+                    executionFrequency = 1000,
                     gatherFrequency = 10,
                     disruptionPatterns = listOf(
                             listOf(),
@@ -121,6 +127,29 @@ fun main(args: Array<String>) {
                                     )
                             )
                     )
+            )
+    ))
+}
+
+private fun runStabilityTest(loadTestConfiguration: LoadTestConfiguration) {
+    runLoadTests(loadTestConfiguration, listOf(
+            // Self issue cash. This is a pre test step to make sure vault have enough cash to work with.
+            StabilityTest.selfIssueTest(100) to LoadTest.RunParameters(
+                    parallelism = loadTestConfiguration.parallelism,
+                    generateCount = 1000,
+                    clearDatabaseBeforeRun = false,
+                    executionFrequency = 50,
+                    gatherFrequency = 100,
+                    disruptionPatterns = listOf(listOf()) // no disruptions
+            ),
+            // Send cash to a random party or exit cash, commands are generated randomly.
+            StabilityTest.crossCashTest(100) to LoadTest.RunParameters(
+                    parallelism = loadTestConfiguration.parallelism,
+                    generateCount = loadTestConfiguration.generateCount,
+                    clearDatabaseBeforeRun = false,
+                    executionFrequency = loadTestConfiguration.executionFrequency,
+                    gatherFrequency = 100,
+                    disruptionPatterns = listOf(listOf())
             )
     ))
 }

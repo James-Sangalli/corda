@@ -6,6 +6,7 @@ import javafx.animation.FadeTransition
 import javafx.animation.TranslateTransition
 import javafx.beans.binding.Bindings
 import javafx.beans.property.SimpleObjectProperty
+import javafx.beans.value.ObservableValue
 import javafx.collections.FXCollections
 import javafx.geometry.Bounds
 import javafx.geometry.Point2D
@@ -23,11 +24,13 @@ import javafx.scene.shape.Line
 import javafx.scene.text.Font
 import javafx.scene.text.FontWeight
 import javafx.util.Duration
-import net.corda.client.fxutils.*
-import net.corda.client.model.*
+import net.corda.client.jfx.model.*
+import net.corda.client.jfx.utils.*
 import net.corda.core.contracts.ContractState
-import net.corda.core.crypto.Party
+import net.corda.core.crypto.toBase58String
+import net.corda.core.identity.Party
 import net.corda.core.node.NodeInfo
+import net.corda.explorer.formatters.PartyNameFormatter
 import net.corda.explorer.model.CordaView
 import tornadofx.*
 
@@ -39,6 +42,9 @@ class Network : CordaView() {
     val notaries by observableList(NetworkIdentityModel::notaries)
     val peers by observableList(NetworkIdentityModel::parties)
     val transactions by observableList(TransactionDataModel::partiallyResolvedTransactions)
+    var centralPeer: String? = null
+    private var centralLabel: ObservableValue<Label?>
+
     // UI components
     private val myIdentityPane by fxid<BorderPane>()
     private val notaryList by fxid<VBox>()
@@ -52,13 +58,11 @@ class Network : CordaView() {
     private val mapOriginalHeight = 2000.0
 
     // UI node observables, declare here to create a strong ref to prevent GC, which removes listener from observables.
+    private var myLabel: Label? = null
     private val notaryComponents = notaries.map { it.render() }
     private val notaryButtons = notaryComponents.map { it.button }
     private val peerComponents = peers.map { it.render() }
     private val peerButtons = peerComponents.filtered { it.nodeInfo != myIdentity.value }.map { it.button }
-    private val myComponent = myIdentity.map { it?.render() }
-    private val myButton = myComponent.map { it?.button }
-    private val myMapLabel = myComponent.map { it?.label }
     private val allComponents = FXCollections.observableArrayList(notaryComponents, peerComponents).concatenate()
     private val allComponentMap = allComponents.associateBy { it.nodeInfo.legalIdentity }
     private val mapLabels = allComponents.map { it.label }
@@ -73,7 +77,7 @@ class Network : CordaView() {
                     .map { it as? PartiallyResolvedTransaction.InputResolution.Resolved }
                     .filterNotNull()
                     .map { it.stateAndRef.state.data }.getParties()
-            val outputParties = it.transaction.tx.outputs.map { it.data }.observable().getParties()
+            val outputParties = it.transaction.tx.outputStates.observable().getParties()
             val signingParties = it.transaction.sigs.map { getModel<NetworkIdentityModel>().lookup(it.by) }
             // Input parties fire a bullets to all output parties, and to the signing parties. !! This is a rough guess of how the message moves in the network.
             // TODO : Expose artemis queue to get real message information.
@@ -81,45 +85,81 @@ class Network : CordaView() {
         }
     }
 
+    private fun NodeInfo.renderButton(mapLabel: Label): Button {
+        val node = this
+        return button {
+            useMaxWidth = true
+            graphic = vbox {
+                label(PartyNameFormatter.short.format(node.legalIdentity.name)) { font = Font.font(font.family, FontWeight.BOLD, 15.0) }
+                gridpane {
+                    hgap = 5.0
+                    vgap = 5.0
+                    row("Pub Key :") {
+                        copyableLabel(SimpleObjectProperty(node.legalIdentity.owningKey.toBase58String())).apply { minWidth = 400.0 }
+                    }
+                    row("Services :") { label(node.advertisedServices.map { it.info }.joinToString(", ")) }
+                    node.worldMapLocation?.apply { row("Location :") { label(this@apply.description) } }
+                }
+            }
+            setOnMouseClicked {
+                mapScrollPane.centerLabel(mapLabel)
+            }
+        }
+    }
+
     private fun NodeInfo.render(): MapViewComponents {
         val node = this
-        val mapLabel = label(node.legalIdentity.name) {
+        val mapLabel = label(PartyNameFormatter.short.format(node.legalIdentity.name))
+        mapPane.add(mapLabel)
+        // applyCss: This method does not normally need to be invoked directly but may be used in conjunction with Parent.layout()
+        // to size a Node before the next pulse, or if the Scene is not in a Stage.
+        // It's needed to properly add node label to the map (before that width and height are 0 which results in wrong placement of
+        // nodes rendered after initial map rendering).
+        mapPane.applyCss()
+        mapPane.layout()
+        mapLabel.apply {
             graphic = FontAwesomeIconView(FontAwesomeIcon.DOT_CIRCLE_ALT)
             contentDisplay = ContentDisplay.TOP
             val coordinate = Bindings.createObjectBinding({
                 // These coordinates are obtained when we generate the map using TileMill.
-                node.physicalLocation?.coordinate?.project(mapPane.width, mapPane.height, 85.0511, -85.0511, -180.0, 180.0) ?: Pair(0.0, 0.0)
+                node.worldMapLocation?.coordinate?.project(mapPane.width, mapPane.height, 85.0511, -85.0511, -180.0, 180.0) ?: Pair(0.0, 0.0)
             }, arrayOf(mapPane.widthProperty(), mapPane.heightProperty()))
             // Center point of the label.
             layoutXProperty().bind(coordinate.map { it.first - width / 2 })
             layoutYProperty().bind(coordinate.map { it.second - height / 4 })
         }
 
-        val button = button {
-            graphic = vbox {
-                label(node.legalIdentity.name) { font = Font.font(font.family, FontWeight.BOLD, 15.0) }
-                gridpane {
-                    hgap = 5.0
-                    vgap = 5.0
-                    row("Pub Key :") { copyableLabel(SimpleObjectProperty(node.legalIdentity.owningKey.toBase58String())) }
-                    row("Services :") { label(node.advertisedServices.map { it.info }.joinToString(", ")) }
-                    node.physicalLocation?.apply { row("Location :") { label(this@apply.description) } }
-                }
-            }
-            setOnMouseClicked { mapScrollPane.centerLabel(mapLabel) }
+        val button = node.renderButton(mapLabel)
+        if (node == myIdentity.value) {
+            // It has to be a copy if we want to have notary both in notaries list and in identity (if we are looking at that particular notary node).
+            myIdentityPane.apply { center = node.renderButton(mapLabel) }
+            myLabel = mapLabel
         }
         return MapViewComponents(this, button, mapLabel)
     }
 
+    override fun onDock() {
+        centralLabel = mapLabels.firstOrDefault(SimpleObjectProperty(myLabel), { centralPeer?.contains(it.text, true) ?: false })
+        centralLabel.value?.let { mapScrollPane.centerLabel(it) }
+    }
+
+    override fun onUndock() {
+        centralPeer = null
+        centralLabel = SimpleObjectProperty(myLabel)
+    }
+
     init {
-        myIdentityPane.centerProperty().bind(myButton)
+        centralLabel = mapLabels.firstOrDefault(SimpleObjectProperty(myLabel), { centralPeer?.contains(it.text, true) ?: false })
         Bindings.bindContent(notaryList.children, notaryButtons)
         Bindings.bindContent(peerList.children, peerButtons)
-        Bindings.bindContent(mapPane.children, mapLabels)
         // Run once when the screen is ready.
         // TODO : Find a better way to do this.
-        mapPane.heightProperty().addListener { _o, old, _new ->
-            if (old == 0.0) myMapLabel.value?.let { mapScrollPane.centerLabel(it) }
+        mapPane.heightProperty().addListener { _, old, _ ->
+            if (old == 0.0) centralLabel.value?.let {
+                mapPane.applyCss()
+                mapPane.layout()
+                mapScrollPane.centerLabel(it)
+            }
         }
         // Listen on zooming gesture, if device has gesture support.
         mapPane.setOnZoom { zoom(it.zoomFactor, Point2D(it.x, it.y)) }
@@ -128,7 +168,7 @@ class Network : CordaView() {
         zoomInButton.setOnAction { zoom(1.2) }
         zoomOutButton.setOnAction { zoom(0.8) }
 
-        lastTransactions.addListener { observableValue, old, new ->
+        lastTransactions.addListener { _, _, new ->
             new?.forEach {
                 it.first.value?.let { a ->
                     it.second.value?.let { b ->
@@ -139,6 +179,7 @@ class Network : CordaView() {
         }
     }
 
+    // TODO It doesn't work as expected.
     private fun ScrollPane.centerLabel(label: Label) {
         this.hvalue = (label.boundsInParent.width / 2 + label.boundsInParent.minX) / mapImageView.layoutBounds.width
         this.vvalue = (label.boundsInParent.height / 2 + label.boundsInParent.minY) / mapImageView.layoutBounds.height
@@ -167,7 +208,7 @@ class Network : CordaView() {
         return Point2D(x, y)
     }
 
-    private fun List<ContractState>.getParties() = map { it.participants.map { getModel<NetworkIdentityModel>().lookup(it) } }.flatten()
+    private fun List<ContractState>.getParties() = map { it.participants.map { getModel<NetworkIdentityModel>().lookup(it.owningKey) } }.flatten()
 
     private fun fireBulletBetweenNodes(senderNode: Party, destNode: Party, startType: String, endType: String) {
         allComponentMap[senderNode]?.let { senderNode ->

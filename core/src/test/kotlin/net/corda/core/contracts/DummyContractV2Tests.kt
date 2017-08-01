@@ -1,8 +1,10 @@
 package net.corda.core.contracts
 
+import net.corda.testing.contracts.DummyContract
+import net.corda.testing.contracts.DummyContractV2
 import net.corda.core.crypto.SecureHash
-import net.corda.core.utilities.DUMMY_NOTARY
-import net.corda.testing.ALICE_PUBKEY
+import net.corda.testing.ALICE
+import net.corda.testing.DUMMY_NOTARY
 import org.junit.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -14,10 +16,10 @@ class DummyContractV2Tests {
     @Test
     fun `upgrade from v1`() {
         val contractUpgrade = DummyContractV2()
-        val v1State = TransactionState(DummyContract.SingleOwnerState(0, ALICE_PUBKEY), DUMMY_NOTARY)
+        val v1State = TransactionState(DummyContract.SingleOwnerState(0, ALICE), DUMMY_NOTARY)
         val v1Ref = StateRef(SecureHash.randomSHA256(), 0)
         val v1StateAndRef = StateAndRef(v1State, v1Ref)
-        val (tx, signers) = DummyContractV2().generateUpgradeFromV1(v1StateAndRef)
+        val (tx, _) = DummyContractV2().generateUpgradeFromV1(v1StateAndRef)
 
         assertEquals(v1Ref, tx.inputs.single())
 

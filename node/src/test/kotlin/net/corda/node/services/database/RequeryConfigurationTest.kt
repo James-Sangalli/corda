@@ -3,71 +3,69 @@ package net.corda.node.services.database
 import io.requery.Persistable
 import io.requery.kotlin.eq
 import io.requery.sql.KotlinEntityDataStore
-import net.corda.core.contracts.DummyContract
 import net.corda.core.contracts.StateRef
-import net.corda.core.contracts.TransactionType
 import net.corda.core.crypto.DigitalSignature
-import net.corda.core.crypto.NullPublicKey
 import net.corda.core.crypto.SecureHash
+import net.corda.core.crypto.testing.NullPublicKey
+import net.corda.core.crypto.toBase58String
+import net.corda.core.identity.AnonymousParty
 import net.corda.core.node.services.Vault
-import net.corda.core.serialization.createKryo
 import net.corda.core.serialization.serialize
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.transactions.WireTransaction
-import net.corda.core.utilities.DUMMY_NOTARY
-import net.corda.core.utilities.DUMMY_PUBKEY_1
 import net.corda.node.services.persistence.DBTransactionStorage
-import net.corda.node.services.vault.schemas.Models
-import net.corda.node.services.vault.schemas.VaultCashBalancesEntity
-import net.corda.node.services.vault.schemas.VaultSchema
-import net.corda.node.services.vault.schemas.VaultStatesEntity
+import net.corda.node.services.vault.schemas.requery.Models
+import net.corda.node.services.vault.schemas.requery.VaultCashBalancesEntity
+import net.corda.node.services.vault.schemas.requery.VaultSchema
+import net.corda.node.services.vault.schemas.requery.VaultStatesEntity
+import net.corda.node.utilities.CordaPersistence
 import net.corda.node.utilities.configureDatabase
-import net.corda.node.utilities.databaseTransaction
+import net.corda.testing.DUMMY_NOTARY
+import net.corda.testing.DUMMY_PUBKEY_1
+import net.corda.testing.TestDependencyInjectionBase
+import net.corda.testing.contracts.DummyContract
 import net.corda.testing.node.makeTestDataSourceProperties
+import net.corda.testing.node.makeTestDatabaseProperties
 import org.assertj.core.api.Assertions
-import org.jetbrains.exposed.sql.Database
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
-import java.io.Closeable
 import java.time.Instant
 import java.util.*
 
-class RequeryConfigurationTest {
+class RequeryConfigurationTest : TestDependencyInjectionBase() {
 
-    lateinit var dataSource: Closeable
-    lateinit var database: Database
+    lateinit var database: CordaPersistence
     lateinit var transactionStorage: DBTransactionStorage
     lateinit var requerySession: KotlinEntityDataStore<Persistable>
 
     @Before
     fun setUp() {
         val dataSourceProperties = makeTestDataSourceProperties()
-        val dataSourceAndDatabase = configureDatabase(dataSourceProperties)
-        dataSource = dataSourceAndDatabase.first
-        database = dataSourceAndDatabase.second
+        database = configureDatabase(dataSourceProperties, makeTestDatabaseProperties())
         newTransactionStorage()
         newRequeryStorage(dataSourceProperties)
     }
 
     @After
     fun cleanUp() {
-        dataSource.close()
+        database.close()
     }
 
     @Test
     fun `transaction inserts in same DB transaction scope across two persistence engines`() {
         val txn = newTransaction()
 
-        databaseTransaction(database) {
+        database.transaction {
             transactionStorage.addTransaction(txn)
             requerySession.withTransaction {
                 insert(createVaultStateEntity(txn))
             }
         }
 
-        databaseTransaction(database) {
+        database.transaction {
             Assertions.assertThat(transactionStorage.transactions).containsOnly(txn)
             requerySession.withTransaction {
                 val result = select(VaultSchema.VaultStates::class) where (VaultSchema.VaultStates::txId eq txn.tx.inputs[0].txhash.toString())
@@ -80,7 +78,7 @@ class RequeryConfigurationTest {
     fun `transaction operations in same DB transaction scope across two persistence engines`() {
         val txn = newTransaction()
 
-        databaseTransaction(database) {
+        database.transaction {
             transactionStorage.addTransaction(txn)
             requerySession.withTransaction {
                 upsert(createCashBalance())
@@ -89,7 +87,7 @@ class RequeryConfigurationTest {
             }
         }
 
-        databaseTransaction(database) {
+        database.transaction {
             Assertions.assertThat(transactionStorage.transactions).containsOnly(txn)
             requerySession.withTransaction {
                 val cashQuery = select(VaultSchema.VaultCashBalances::class) where (VaultSchema.VaultCashBalances::currency eq "GBP")
@@ -104,7 +102,7 @@ class RequeryConfigurationTest {
     fun `transaction rollback in same DB transaction scope across two persistence engines`() {
         val txn = newTransaction()
 
-        databaseTransaction(database) {
+        database.transaction {
             transactionStorage.addTransaction(txn)
             requerySession.withTransaction {
                 insert(createVaultStateEntity(txn))
@@ -112,12 +110,61 @@ class RequeryConfigurationTest {
             rollback()
         }
 
-        databaseTransaction(database) {
+        database.transaction {
             Assertions.assertThat(transactionStorage.transactions).isEmpty()
             requerySession.withTransaction {
                 val result = select(VaultSchema.VaultStates::class) where (VaultSchema.VaultStates::txId eq txn.tx.inputs[0].txhash.toString())
                 Assertions.assertThat(result.get().count() == 0)
             }
+        }
+    }
+
+    @Test
+    fun `bounded iteration`() {
+        // insert 100 entities
+        database.transaction {
+            requerySession.withTransaction {
+                (1..100)
+                        .map { newTransaction(it) }
+                        .forEach { insert(createVaultStateEntity(it)) }
+            }
+        }
+
+        // query entities 41..45
+        database.transaction {
+            requerySession.withTransaction {
+                // Note: cannot specify a limit explicitly when using iterator skip & take
+                val query = select(VaultSchema.VaultStates::class)
+                val count = query.get().count()
+                Assertions.assertThat(count).isEqualTo(100)
+                val result = query.get().iterator(40, 5)
+                Assertions.assertThat(result.asSequence().count()).isEqualTo(5)
+            }
+        }
+    }
+
+    @Test
+    fun `test calling an arbitrary JDBC native query`() {
+        val txn = newTransaction()
+
+        database.transaction {
+            transactionStorage.addTransaction(txn)
+            requerySession.withTransaction {
+                insert(createVaultStateEntity(txn))
+            }
+        }
+
+        val dataSourceProperties = makeTestDataSourceProperties()
+        val nativeQuery = "SELECT v.transaction_id, v.output_index FROM vault_states v WHERE v.state_status = 0"
+
+        database.transaction {
+            val configuration = RequeryConfiguration(dataSourceProperties, true, makeTestDatabaseProperties())
+            val jdbcSession = configuration.jdbcSession()
+            val prepStatement = jdbcSession.prepareStatement(nativeQuery)
+            val rs = prepStatement.executeQuery()
+            assertTrue(rs.next())
+            assertEquals(rs.getString(1), txn.tx.inputs[0].txhash.toString())
+            assertEquals(rs.getInt(2), txn.tx.inputs[0].index)
         }
     }
 
@@ -128,8 +175,8 @@ class RequeryConfigurationTest {
             index = txnState.index
             stateStatus = Vault.StateStatus.UNCONSUMED
             contractStateClassName = DummyContract.SingleOwnerState::class.java.name
-            contractState = DummyContract.SingleOwnerState(owner = DUMMY_PUBKEY_1).serialize(createKryo()).bytes
-            notaryName = txn.tx.notary!!.name
+            contractState = DummyContract.SingleOwnerState(owner = AnonymousParty(DUMMY_PUBKEY_1)).serialize().bytes
+            notaryName = txn.tx.notary!!.name.toString()
             notaryKey = txn.tx.notary!!.owningKey.toBase58String()
             recordedTime = Instant.now()
         }
@@ -144,29 +191,27 @@ class RequeryConfigurationTest {
     }
 
     private fun newTransactionStorage() {
-        databaseTransaction(database) {
+        database.transaction {
             transactionStorage = DBTransactionStorage()
         }
     }
 
     private fun newRequeryStorage(dataSourceProperties: Properties) {
-        databaseTransaction(database) {
-            val configuration = RequeryConfiguration(dataSourceProperties, true)
+        database.transaction {
+            val configuration = RequeryConfiguration(dataSourceProperties, true, makeTestDatabaseProperties())
             requerySession = configuration.sessionForModel(Models.VAULT)
         }
     }
 
-    private fun newTransaction(): SignedTransaction {
+    private fun newTransaction(index: Int = 0): SignedTransaction {
         val wtx = WireTransaction(
-                inputs = listOf(StateRef(SecureHash.randomSHA256(), 0)),
+                inputs = listOf(StateRef(SecureHash.randomSHA256(), index)),
                 attachments = emptyList(),
                 outputs = emptyList(),
                 commands = emptyList(),
                 notary = DUMMY_NOTARY,
-                signers = emptyList(),
-                type = TransactionType.General(),
-                timestamp = null
+                timeWindow = null
         )
-        return SignedTransaction(wtx.serialized, listOf(DigitalSignature.WithKey(NullPublicKey, ByteArray(1))), wtx.id)
+        return SignedTransaction(wtx, listOf(DigitalSignature.WithKey(NullPublicKey, ByteArray(1))))
     }
 }

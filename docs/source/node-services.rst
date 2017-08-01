@@ -1,5 +1,5 @@
-Brief introduction to the node services
-=======================================
+Node services
+=============
 
 This document is intended as a very brief introduction to the current 
 service components inside the node. Whilst not at all exhaustive it is 
@@ -65,12 +65,12 @@ PersistentKeyManagementService and E2ETestKeyManagementService
 Typical usage of these services is to locate an appropriate 
 ``PrivateKey`` to complete and sign a verified transaction as part of a 
 flow. The normal node legal identifier keys are typically accessed via 
-helper extension methods on the ``ServiceHub``, but these ultimately 
-fetch the keys from the ``KeyManagementService``. The 
+helper extension methods on the ``ServiceHub``, but these ultimately delegate
+signing to internal ``PrivateKeys`` from the ``KeyManagementService``. The
 ``KeyManagementService`` interface also allows other keys to be 
 generated if anonymous keys are needed in a flow. Note that this 
-interface works at the level of individual ``PublicKey``/``PrivateKey`` 
-pairs, but the signing authority will be represented by a 
+interface works at the level of individual ``PublicKey`` and internally
+matched ``PrivateKey` pairs, but the signing authority may be represented by a 
 ``CompositeKey`` on the ``NodeInfo`` to allow key clustering and 
 threshold schemes. 
 
@@ -346,11 +346,13 @@ external legacy systems by insertion of unpacked data into existing
 tables. To enable these features the contract state must implement the 
 ``QueryableState`` interface to define the mappings. 
 
-Node Web Server
----------------
+Corda Web Server
+----------------
 
-A web server comes bundled with the node by default, but is not started
-automatically. This web server exposes both RPC backed API calls and
-static content serving. The web server is not automatically started,
-you must explicitly start it in the node driver or define a web port
-in your `Cordformation`_ configuration.
+A simple web server is provided that embeds the Jetty servlet container.
+The Corda web server is not meant to be used for real, production-quality
+web apps. Instead it shows one example way of using Corda RPC in web apps
+to provide a REST API on top of the Corda native RPC mechanism.
+
+.. note:: The Corda web server may be removed in future and replaced with
+   sample specific webapps using a standard framework like Spring Boot.

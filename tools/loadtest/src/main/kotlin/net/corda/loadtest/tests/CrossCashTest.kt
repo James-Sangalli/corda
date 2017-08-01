@@ -2,21 +2,17 @@ package net.corda.loadtest.tests
 
 import net.corda.client.mock.Generator
 import net.corda.client.mock.pickN
+import net.corda.client.rpc.notUsed
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.Issued
 import net.corda.core.contracts.PartyAndReference
 import net.corda.core.contracts.USD
-import net.corda.core.crypto.AbstractParty
-import net.corda.core.crypto.AnonymousParty
-import net.corda.core.flows.FlowException
-import net.corda.core.getOrThrow
-import net.corda.core.messaging.startFlow
-import net.corda.core.serialization.OpaqueBytes
-import net.corda.core.toFuture
-import net.corda.flows.CashException
+import net.corda.core.identity.AbstractParty
+import net.corda.core.thenMatch
+import net.corda.core.utilities.OpaqueBytes
 import net.corda.flows.CashFlowCommand
 import net.corda.loadtest.LoadTest
-import net.corda.loadtest.NodeHandle
+import net.corda.loadtest.NodeConnection
 import org.slf4j.LoggerFactory
 import java.util.*
 
@@ -30,7 +26,7 @@ private val log = LoggerFactory.getLogger("CrossCash")
 
 data class CrossCashCommand(
         val command: CashFlowCommand,
-        val node: NodeHandle
+        val node: NodeConnection
 ) {
     override fun toString(): String {
         return when (command) {
@@ -108,7 +104,7 @@ data class CrossCashState(
                             it.value.map {
                                 val notifier = it.key
                                 "        $notifier: [" + it.value.map {
-                                    Issued(PartyAndReference(it.first.toAnonymous(), OpaqueBytes.of(0)), it.second)
+                                    Issued(PartyAndReference(it.first, OpaqueBytes.of(0)), it.second)
                                 }.joinToString(",") + "]"
                             }.joinToString("\n")
                 }.joinToString("\n")
@@ -118,15 +114,16 @@ data class CrossCashState(
 val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
         "Creating Cash transactions randomly",
 
-        generate = { state, parallelism ->
+        generate = { (nodeVaults), parallelism ->
             val nodeMap = simpleNodes.associateBy { it.info.legalIdentity }
-            Generator.pickN(parallelism, simpleNodes).bind { nodes ->
+            val anonymous = true
+            Generator.pickN(parallelism, simpleNodes).flatMap { nodes ->
                 Generator.sequence(
                         nodes.map { node ->
-                            val quantities = state.nodeVaults[node.info.legalIdentity] ?: mapOf()
+                            val quantities = nodeVaults[node.info.legalIdentity] ?: mapOf()
                             val possibleRecipients = nodeMap.keys.toList()
                             val moves = quantities.map {
-                                it.value.toDouble() / 1000 to generateMove(it.value, USD, it.key.toAnonymous(), possibleRecipients)
+                                it.value.toDouble() / 1000 to generateMove(it.value, USD, node.info.legalIdentity, possibleRecipients, anonymous)
                             }
                             val exits = quantities.mapNotNull {
                                 if (it.key == node.info.legalIdentity) {
@@ -136,7 +133,7 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
                                 }
                             }
                             val command = Generator.frequency(
-                                    listOf(1.0 to generateIssue(10000, USD, notary.info.notaryIdentity, possibleRecipients)) + moves + exits
+                                    listOf(1.0 to generateIssue(10000, USD, notary.info.notaryIdentity, possibleRecipients, anonymous)) + moves + exits
                             )
                             command.map { CrossCashCommand(it, nodeMap[node.info.legalIdentity]!!) }
                         }
@@ -161,26 +158,26 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
                     val newDiffQueues = state.copyQueues()
                     val recipientOriginators = newDiffQueues.getOrPut(command.command.recipient, { HashMap() })
                     val senderQuantities = newNodeVaults[command.node.info.legalIdentity]!!
-                    val quantity = command.command.amount.quantity
-                    val issuer = command.command.amount.token.issuer.party
+                    val amount = command.command.amount
+                    val issuer = command.command.issuerConstraint!!
                     val originator = command.node.info.legalIdentity
                     val senderQuantity = senderQuantities[issuer] ?: throw Exception(
                             "Generated payment of ${command.command.amount} from ${command.node.info.legalIdentity}, " +
                                     "however there is no cash from $issuer!"
                     )
-                    if (senderQuantity < quantity) {
+                    if (senderQuantity < amount.quantity) {
                         throw Exception(
                                 "Generated payment of ${command.command.amount} from ${command.node.info.legalIdentity}, " +
                                         "however they only have $senderQuantity!"
                         )
                     }
-                    if (senderQuantity == quantity) {
+                    if (senderQuantity == amount.quantity) {
                         senderQuantities.remove(issuer)
                     } else {
-                        senderQuantities.put(issuer, senderQuantity - quantity)
+                        senderQuantities.put(issuer, senderQuantity - amount.quantity)
                     }
                     val recipientQueue = recipientOriginators.getOrPut(originator, { ArrayList() })
-                    recipientQueue.add(Pair(issuer, quantity))
+                    recipientQueue.add(Pair(issuer, amount.quantity))
                     CrossCashState(newNodeVaults, newDiffQueues)
                 }
                 is CashFlowCommand.ExitCash -> {
@@ -208,12 +205,12 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
         },
 
         execute = { command ->
-            try {
-                val result = command.command.startFlow(command.node.connection.proxy).returnValue.getOrThrow()
-                log.info("Success: $result")
-            } catch (e: FlowException) {
-                log.error("Failure", e)
-            }
+            val result = command.command.startFlow(command.node.proxy).returnValue
+            result.thenMatch({
+                log.info("Success[$command]: $result")
+            }, {
+                log.error("Failure[$command]", it)
+            })
         },
 
         gatherRemoteState = { previousState ->
@@ -221,7 +218,8 @@ val crossCashTest = LoadTest<CrossCashCommand, CrossCashState>(
             val currentNodeVaults = HashMap<AbstractParty, HashMap<AbstractParty, Long>>()
             simpleNodes.forEach {
                 val quantities = HashMap<AbstractParty, Long>()
-                val vault = it.connection.proxy.vaultAndUpdates().first
+                val (vault, vaultUpdates) = it.proxy.vaultAndUpdates()
+                vaultUpdates.notUsed()
                 vault.forEach {
                     val state = it.state.data
                     if (state is Cash.State) {
@@ -314,10 +312,10 @@ private fun <A> searchForState(
             consumedTxs[originator] = 0
             searchForStateHelper(state, diffIx + 1, consumedTxs, matched)
             var currentState = state
-            queue.forEachIndexed { index, pair ->
+            queue.forEachIndexed { index, (issuer, quantity) ->
                 consumedTxs[originator] = index + 1
                 // Prune search if we exceeded the searched quantity anyway
-                currentState = applyDiff(pair.first, pair.second, currentState, searchedState) ?: return
+                currentState = applyDiff(issuer, quantity, currentState, searchedState) ?: return
                 searchForStateHelper(currentState, diffIx + 1, consumedTxs, matched)
             }
         }

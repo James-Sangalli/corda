@@ -1,13 +1,16 @@
 package net.corda.core.crypto
 
-import com.google.common.io.BaseEncoding
-import net.corda.core.serialization.OpaqueBytes
+import net.corda.core.serialization.CordaSerializable
+import net.corda.core.utilities.OpaqueBytes
+import net.corda.core.utilities.parseAsHex
+import net.corda.core.utilities.toHexString
 import java.security.MessageDigest
 
 /**
  * Container for a cryptographically secure hash value.
  * Provides utilities for generating a cryptographic hash using different algorithms (currently only SHA-256 supported).
  */
+@CordaSerializable
 sealed class SecureHash(bytes: ByteArray) : OpaqueBytes(bytes) {
     /** SHA-256 is part of the SHA-2 hash function family. Generated hash is fixed size, 256-bits (32-bytes) */
     class SHA256(bytes: ByteArray) : SecureHash(bytes) {
@@ -16,7 +19,7 @@ sealed class SecureHash(bytes: ByteArray) : OpaqueBytes(bytes) {
         }
     }
 
-    override fun toString() = BaseEncoding.base16().encode(bytes)
+    override fun toString(): String = bytes.toHexString()
 
     fun prefixChars(prefixLen: Int = 6) = toString().substring(0, prefixLen)
     fun hashConcat(other: SecureHash) = (this.bytes + other.bytes).sha256()
@@ -24,7 +27,7 @@ sealed class SecureHash(bytes: ByteArray) : OpaqueBytes(bytes) {
     // Like static methods in Java, except the 'companion' is a singleton that can have state.
     companion object {
         @JvmStatic
-        fun parse(str: String) = BaseEncoding.base16().decode(str.toUpperCase()).let {
+        fun parse(str: String) = str.toUpperCase().parseAsHex().let {
             when (it.size) {
                 32 -> SHA256(it)
                 else -> throw IllegalArgumentException("Provided string is ${it.size} bytes not 32 bytes in hex: $str")

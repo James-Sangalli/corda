@@ -1,15 +1,18 @@
 package net.corda.vega.api
 
 import com.opengamma.strata.basics.currency.MultiCurrencyAmount
-import net.corda.core.contracts.DealState
+import net.corda.client.rpc.notUsed
+import net.corda.contracts.DealState
 import net.corda.core.contracts.StateAndRef
 import net.corda.core.contracts.filterStatesOfType
-import net.corda.core.crypto.AbstractParty
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
+import net.corda.core.crypto.parsePublicKeyBase58
+import net.corda.core.crypto.toBase58String
 import net.corda.core.getOrThrow
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
 import net.corda.core.messaging.CordaRPCOps
 import net.corda.core.messaging.startFlow
+import net.corda.core.node.services.ServiceType
 import net.corda.vega.analytics.InitialMarginTriple
 import net.corda.vega.contracts.IRSState
 import net.corda.vega.contracts.PortfolioState
@@ -19,6 +22,7 @@ import net.corda.vega.flows.SimmRevaluation
 import net.corda.vega.portfolio.Portfolio
 import net.corda.vega.portfolio.toPortfolio
 import net.corda.vega.portfolio.toStateAndRef
+import org.bouncycastle.asn1.x500.X500Name
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -28,14 +32,15 @@ import javax.ws.rs.core.Response
 
 //TODO: Change import namespaces vega -> ....
 
-
 @Path("simmvaluationdemo")
 class PortfolioApi(val rpc: CordaRPCOps) {
     private val ownParty: Party get() = rpc.nodeIdentity().legalIdentity
     private val portfolioUtils = PortfolioApiUtils(ownParty)
 
     private inline fun <reified T : DealState> dealsWith(party: AbstractParty): List<StateAndRef<T>> {
-        return rpc.vaultAndUpdates().first.filterStatesOfType<T>().filter { it.state.data.parties.any { it == party } }
+        val (vault, vaultUpdates) = rpc.vaultAndUpdates()
+        vaultUpdates.notUsed()
+        return vault.filterStatesOfType<T>().filter { it.state.data.participants.any { it == party } }
     }
 
     /**
@@ -43,7 +48,7 @@ class PortfolioApi(val rpc: CordaRPCOps) {
      * Used as such: withParty(name) { doSomethingWith(it) }
      */
     private fun withParty(partyName: String, func: (Party) -> Response): Response {
-        val otherParty = rpc.partyFromKey(CompositeKey.parseFromBase58(partyName))
+        val otherParty = rpc.partyFromKey(parsePublicKeyBase58(partyName))
         return if (otherParty != null) {
             func(otherParty)
         } else {
@@ -130,8 +135,8 @@ class PortfolioApi(val rpc: CordaRPCOps) {
             Response.ok().entity(swaps.map {
                 it.toView(ownParty,
                         latestPortfolioStateData?.portfolio?.toStateAndRef<IRSState>(rpc)?.toPortfolio(),
-                        PVs?.get(it.id.second.toString()) ?: MultiCurrencyAmount.empty(),
-                        IMs?.get(it.id.second.toString()) ?: InitialMarginTriple.zero()
+                        PVs?.get(it.id.second) ?: MultiCurrencyAmount.empty(),
+                        IMs?.get(it.id.second) ?: InitialMarginTriple.zero()
                 )
             }).build()
         }
@@ -147,7 +152,7 @@ class PortfolioApi(val rpc: CordaRPCOps) {
         return withParty(partyName) {
             val states = dealsWith<IRSState>(it)
             val tradeState = states.first { it.state.data.swap.id.second == tradeId }.state.data
-            Response.ok().entity(portfolioUtils.createTradeView(tradeState)).build()
+            Response.ok().entity(portfolioUtils.createTradeView(rpc, tradeState)).build()
         }
     }
 
@@ -221,7 +226,7 @@ class PortfolioApi(val rpc: CordaRPCOps) {
         return withParty(partyName) { party ->
             withPortfolio(party) { state ->
                 if (state.valuation != null) {
-                    val isValuer = state.valuer as AbstractParty == ownParty
+                    val isValuer = state.valuer == ownParty
                     val rawMtm = state.valuation.presentValues.map {
                         it.value.amounts.first().amount
                     }.reduce { a, b -> a + b }
@@ -237,7 +242,7 @@ class PortfolioApi(val rpc: CordaRPCOps) {
         }
     }
 
-    data class ApiParty(val id: String, val text: String)
+    data class ApiParty(val id: String, val text: X500Name)
     data class AvailableParties(val self: ApiParty, val counterparties: List<ApiParty>)
 
     /**
@@ -247,8 +252,11 @@ class PortfolioApi(val rpc: CordaRPCOps) {
     @Path("whoami")
     @Produces(MediaType.APPLICATION_JSON)
     fun getWhoAmI(): AvailableParties {
-        val counterParties = rpc.networkMapUpdates().first.filter {
-            it.legalIdentity.name != "NetworkMapService" && it.legalIdentity.name != "Notary" && it.legalIdentity.name != ownParty.name
+        val (parties, partyUpdates) = rpc.networkMapFeed()
+        partyUpdates.notUsed()
+        val counterParties = parties.filterNot {
+            it.advertisedServices.any { it.info.type in setOf(ServiceType.networkMap, ServiceType.notary) }
+                    || it.legalIdentity == ownParty
         }
 
         return AvailableParties(
@@ -282,4 +290,3 @@ class PortfolioApi(val rpc: CordaRPCOps) {
         }
     }
 }
-

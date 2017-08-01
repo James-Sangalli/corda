@@ -1,7 +1,9 @@
 package net.corda.node.services.transactions
 
-import com.google.common.net.HostAndPort
+import io.atomix.catalyst.buffer.BufferInput
+import io.atomix.catalyst.buffer.BufferOutput
 import io.atomix.catalyst.serializer.Serializer
+import io.atomix.catalyst.serializer.TypeSerializer
 import io.atomix.catalyst.transport.Address
 import io.atomix.catalyst.transport.Transport
 import io.atomix.catalyst.transport.netty.NettyTransport
@@ -12,16 +14,17 @@ import io.atomix.copycat.server.CopycatServer
 import io.atomix.copycat.server.storage.Storage
 import io.atomix.copycat.server.storage.StorageLevel
 import net.corda.core.contracts.StateRef
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
+import net.corda.core.identity.Party
 import net.corda.core.node.services.UniquenessException
 import net.corda.core.node.services.UniquenessProvider
 import net.corda.core.serialization.SingletonSerializeAsToken
 import net.corda.core.serialization.deserialize
 import net.corda.core.serialization.serialize
 import net.corda.core.utilities.loggerFor
-import net.corda.node.services.config.SSLConfiguration
-import org.jetbrains.exposed.sql.Database
+import net.corda.node.services.api.ServiceHubInternal
+import net.corda.node.utilities.CordaPersistence
+import net.corda.nodeapi.config.SSLConfiguration
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
 import javax.annotation.concurrent.ThreadSafe
@@ -33,23 +36,31 @@ import javax.annotation.concurrent.ThreadSafe
  * The uniqueness provider maintains both a Copycat cluster node (server) and a client through which it can submit
  * requests to the cluster. In Copycat, a client request is first sent to the server it's connected to and then redirected
  * to the cluster leader to be actioned.
- *
- * @param storagePath Directory storing the Raft log and state machine snapshots
- * @param myAddress Address of the Copycat node run by this Corda node
- * @param clusterAddresses List of node addresses in the existing Copycat cluster. At least one active node must be
- * provided to join the cluster. If empty, a new cluster will be bootstrapped.
- * @param db The database to store the state machine state in
- * @param config SSL configuration
  */
 @ThreadSafe
-class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterAddresses: List<HostAndPort>,
-                             db: Database, config: SSLConfiguration) : UniquenessProvider, SingletonSerializeAsToken() {
+class RaftUniquenessProvider(services: ServiceHubInternal) : UniquenessProvider, SingletonSerializeAsToken() {
     companion object {
         private val log = loggerFor<RaftUniquenessProvider>()
         private val DB_TABLE_NAME = "notary_committed_states"
     }
 
-    private val _clientFuture: CompletableFuture<CopycatClient>
+    /** Directory storing the Raft log and state machine snapshots */
+    private val storagePath: Path = services.configuration.baseDirectory
+    /** Address of the Copycat node run by this Corda node */
+    private val myAddress = services.configuration.notaryNodeAddress
+            ?: throw IllegalArgumentException("notaryNodeAddress must be specified in configuration")
+    /**
+     * List of node addresses in the existing Copycat cluster. At least one active node must be
+     * provided to join the cluster. If empty, a new cluster will be bootstrapped.
+     */
+    private val clusterAddresses = services.configuration.notaryClusterAddresses
+    /** The database to store the state machine state in */
+    private val db: CordaPersistence = services.database
+    /** SSL configuration */
+    private val transportConfiguration: SSLConfiguration = services.configuration
+
+    private lateinit var _clientFuture: CompletableFuture<CopycatClient>
+    private lateinit var server: CopycatServer
     /**
      * Copycat clients are responsible for connecting to the cluster and submitting commands and queries that operate
      * on the cluster's replicated state machine.
@@ -57,15 +68,37 @@ class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterA
     private val client: CopycatClient
         get() = _clientFuture.get()
 
-    init {
+    fun start() {
         log.info("Creating Copycat server, log stored in: ${storagePath.toFile()}")
         val stateMachineFactory = { DistributedImmutableMap<String, ByteArray>(db, DB_TABLE_NAME) }
-        val address = Address(myAddress.hostText, myAddress.port)
+        val address = Address(myAddress.host, myAddress.port)
         val storage = buildStorage(storagePath)
-        val transport = buildTransport(config)
-        val serializer = Serializer()
+        val transport = buildTransport(transportConfiguration)
+        val serializer = Serializer().apply {
+            // Add serializers so Catalyst doesn't attempt to fall back on Java serialization for these types, which is disabled process-wide:
+            register(DistributedImmutableMap.Commands.PutAll::class.java) {
+                object : TypeSerializer<DistributedImmutableMap.Commands.PutAll<*, *>> {
+                    override fun write(obj: DistributedImmutableMap.Commands.PutAll<*, *>,
+                                       buffer: BufferOutput<out BufferOutput<*>>,
+                                       serializer: Serializer) {
+                        writeMap(obj.entries, buffer, serializer)
+                    }
+                    override fun read(type: Class<DistributedImmutableMap.Commands.PutAll<*, *>>,
+                                      buffer: BufferInput<out BufferInput<*>>,
+                                      serializer: Serializer): DistributedImmutableMap.Commands.PutAll<Any, Any> {
+                        return DistributedImmutableMap.Commands.PutAll(readMap(buffer, serializer))
+                    }
+                }
+            }
+            register(LinkedHashMap::class.java) {
+                object : TypeSerializer<LinkedHashMap<*, *>> {
+                    override fun write(obj: LinkedHashMap<*, *>, buffer: BufferOutput<out BufferOutput<*>>, serializer: Serializer) = writeMap(obj, buffer, serializer)
+                    override fun read(type: Class<LinkedHashMap<*, *>>, buffer: BufferInput<out BufferInput<*>>, serializer: Serializer) = readMap(buffer, serializer)
+                }
+            }
+        }
 
-        val server = CopycatServer.builder(address)
+        server = CopycatServer.builder(address)
                 .withStateMachine(stateMachineFactory)
                 .withStorage(storage)
                 .withServerTransport(transport)
@@ -74,7 +107,7 @@ class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterA
 
         val serverFuture = if (clusterAddresses.isNotEmpty()) {
             log.info("Joining an existing Copycat cluster at $clusterAddresses")
-            val cluster = clusterAddresses.map { Address(it.hostText, it.port) }
+            val cluster = clusterAddresses.map { Address(it.host, it.port) }
             server.join(cluster)
         } else {
             log.info("Bootstrapping a Copycat cluster at $address")
@@ -89,6 +122,10 @@ class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterA
         _clientFuture = serverFuture.thenCompose { client.connect(address) }
     }
 
+    fun stop() {
+        server.shutdown()
+    }
+
     private fun buildStorage(storagePath: Path): Storage? {
         return Storage.builder()
                 .withDirectory(storagePath.toFile())
@@ -100,7 +137,7 @@ class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterA
         return NettyTransport.builder()
                 .withSsl()
                 .withSslProtocol(SslProtocol.TLSv1_2)
-                .withKeyStorePath(config.keyStoreFile.toString())
+                .withKeyStorePath(config.sslKeystore.toString())
                 .withKeyStorePassword(config.keyStorePassword)
                 .withTrustStorePath(config.trustStoreFile.toString())
                 .withTrustStorePassword(config.trustStorePassword)
@@ -130,5 +167,23 @@ class RaftUniquenessProvider(storagePath: Path, myAddress: HostAndPort, clusterA
     private fun decode(items: Map<String, ByteArray>): Map<StateRef, UniquenessProvider.ConsumingTx> {
         fun String.toStateRef() = split(":").let { StateRef(SecureHash.parse(it[0]), it[1].toInt()) }
         return items.map { it.key.toStateRef() to it.value.deserialize<UniquenessProvider.ConsumingTx>() }.toMap()
+    }
+}
+
+private fun writeMap(map: Map<*, *>, buffer: BufferOutput<out BufferOutput<*>>, serializer: Serializer) = with(map) {
+    buffer.writeInt(size)
+    forEach {
+        with(serializer) {
+            writeObject(it.key, buffer)
+            writeObject(it.value, buffer)
+        }
+    }
+}
+
+private fun readMap(buffer: BufferInput<out BufferInput<*>>, serializer: Serializer): LinkedHashMap<Any, Any> {
+    return LinkedHashMap<Any, Any>().apply {
+        repeat(buffer.readInt()) {
+            put(serializer.readObject(buffer), serializer.readObject(buffer))
+        }
     }
 }

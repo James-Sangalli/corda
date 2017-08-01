@@ -1,9 +1,13 @@
 package net.corda.node.utilities
 
+import net.corda.core.internal.until
 import net.corda.core.serialization.SerializeAsToken
 import net.corda.core.serialization.SerializeAsTokenContext
-import net.corda.core.serialization.SingletonSerializationToken
-import java.time.*
+import net.corda.core.serialization.SingletonSerializationToken.Companion.singletonSerializationToken
+import java.time.Clock
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
 import javax.annotation.concurrent.ThreadSafe
 
 /**
@@ -12,15 +16,15 @@ import javax.annotation.concurrent.ThreadSafe
 @ThreadSafe
 class TestClock(private var delegateClock: Clock = Clock.systemUTC()) : MutableClock(), SerializeAsToken {
 
-    private val token = SingletonSerializationToken(this)
+    private val token = singletonSerializationToken(javaClass)
 
-    override fun toToken(context: SerializeAsTokenContext) = SingletonSerializationToken.registerWithContext(token, this, context)
+    override fun toToken(context: SerializeAsTokenContext) = token.registerWithContext(context, this)
 
     @Synchronized fun updateDate(date: LocalDate): Boolean {
         val currentDate = LocalDate.now(this)
         if (currentDate.isBefore(date)) {
             // It's ok to increment
-            delegateClock = Clock.offset(delegateClock, Duration.between(currentDate.atStartOfDay(), date.atStartOfDay()))
+            delegateClock = Clock.offset(delegateClock, currentDate.atStartOfDay() until date.atStartOfDay())
             notifyMutationObservers()
             return true
         }

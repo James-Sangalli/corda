@@ -2,13 +2,13 @@ package net.corda.flows
 
 import co.paralleluniverse.fibers.Suspendable
 import net.corda.contracts.asset.Cash
-import net.corda.core.contracts.*
-import net.corda.core.crypto.Party
-import net.corda.core.node.services.Vault
-import net.corda.core.node.services.unconsumedStates
-import net.corda.core.serialization.OpaqueBytes
-import net.corda.core.transactions.SignedTransaction
+import net.corda.core.contracts.Amount
+import net.corda.core.contracts.InsufficientBalanceException
+import net.corda.core.contracts.issuedBy
+import net.corda.core.flows.StartableByRPC
+import net.corda.core.identity.Party
 import net.corda.core.transactions.TransactionBuilder
+import net.corda.core.utilities.OpaqueBytes
 import net.corda.core.utilities.ProgressTracker
 import java.util.*
 
@@ -19,30 +19,33 @@ import java.util.*
  * @param issuerRef the reference on the issued currency. Added to the node's legal identity to determine the
  * issuer.
  */
-class CashExitFlow(val amount: Amount<Currency>, val issueRef: OpaqueBytes, progressTracker: ProgressTracker) : AbstractCashFlow(progressTracker) {
+@StartableByRPC
+class CashExitFlow(val amount: Amount<Currency>, val issueRef: OpaqueBytes, progressTracker: ProgressTracker) : AbstractCashFlow<AbstractCashFlow.Result>(progressTracker) {
     constructor(amount: Amount<Currency>, issueRef: OpaqueBytes) : this(amount, issueRef, tracker())
 
     companion object {
         fun tracker() = ProgressTracker(GENERATING_TX, SIGNING_TX, FINALISING_TX)
     }
 
+    /**
+     * @return the signed transaction, and a mapping of parties to new anonymous identities generated
+     * (for this flow this map is always empty).
+     */
     @Suspendable
     @Throws(CashException::class)
-    override fun call(): SignedTransaction {
+    override fun call(): AbstractCashFlow.Result {
         progressTracker.currentStep = GENERATING_TX
-        val builder: TransactionBuilder = TransactionType.General.Builder(null)
+        val builder: TransactionBuilder = TransactionBuilder(notary = null as Party?)
         val issuer = serviceHub.myInfo.legalIdentity.ref(issueRef)
-        try {
+        val exitStates = serviceHub.vaultService.unconsumedStatesForSpending<Cash.State>(amount, setOf(issuer.party), builder.notary, builder.lockId, setOf(issuer.reference))
+        val signers = try {
             Cash().generateExit(
                     builder,
                     amount.issuedBy(issuer),
-                    serviceHub.vaultService.unconsumedStates<Cash.State>().filter { it.state.data.owner == issuer.party.owningKey })
+                    exitStates)
         } catch (e: InsufficientBalanceException) {
             throw CashException("Exiting more cash than exists", e)
         }
-        progressTracker.currentStep = SIGNING_TX
-        val myKey = serviceHub.legalIdentityKey
-        builder.signWith(myKey)
 
         // Work out who the owners of the burnt states were
         val inputStatesNullable = serviceHub.vaultService.statesForRefs(builder.inputStates())
@@ -56,14 +59,16 @@ class CashExitFlow(val amount: Amount<Currency>, val issueRef: OpaqueBytes, prog
         //       count as a reason to fail?
         val participants: Set<Party> = inputStates
                 .filterIsInstance<Cash.State>()
-                .map { serviceHub.identityService.partyFromKey(it.owner) }
+                .map { serviceHub.identityService.partyFromAnonymous(it.owner) }
                 .filterNotNull()
                 .toSet()
+        // Sign transaction
+        progressTracker.currentStep = SIGNING_TX
+        val tx = serviceHub.signInitialTransaction(builder, signers)
 
         // Commit the transaction
-        val tx = builder.toSignedTransaction(checkSufficientSignatures = false)
         progressTracker.currentStep = FINALISING_TX
         finaliseTx(participants, tx, "Unable to notarise exit")
-        return tx
+        return Result(tx, null)
     }
 }

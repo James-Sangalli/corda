@@ -1,7 +1,7 @@
 package net.corda.contracts.universal
 
-import net.corda.core.contracts.Frequency
-import net.corda.core.utilities.DUMMY_NOTARY
+import net.corda.contracts.Frequency
+import net.corda.testing.DUMMY_NOTARY
 import net.corda.testing.transaction
 import org.junit.Test
 import java.time.Instant
@@ -36,7 +36,7 @@ class RollOutTests {
             }
         }
     }
-    val stateStart = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), contract)
+    val stateStart = UniversalContract.State(listOf(DUMMY_NOTARY), contract)
 
     val contractStep1a = arrange {
         rollOut("2016-10-03".ld, "2017-09-01".ld, Frequency.Monthly) {
@@ -55,8 +55,8 @@ class RollOutTests {
         highStreetBank.owes(acmeCorp, 10.K, USD)
     }
 
-    val stateStep1a = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), contractStep1a)
-    val stateStep1b = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), contractStep1b)
+    val stateStep1a = UniversalContract.State(listOf(DUMMY_NOTARY), contractStep1a)
+    val stateStep1b = UniversalContract.State(listOf(DUMMY_NOTARY), contractStep1b)
 
     val contract_transfer1 = arrange {
         highStreetBank.owes(acmeCorp, 10.K, USD)
@@ -143,7 +143,7 @@ class RollOutTests {
     fun issue() {
         transaction {
             output { stateStart }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             this `fails with` "transaction has a single command"
 
@@ -164,7 +164,7 @@ class RollOutTests {
             input { stateStart }
             output { stateStep1a }
             output { stateStep1b }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             /*   tweak {
                    command(highStreetBank.owningKey) { UniversalContract.Commands.Action("some undefined name") }

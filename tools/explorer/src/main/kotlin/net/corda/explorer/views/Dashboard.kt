@@ -1,6 +1,7 @@
 package net.corda.explorer.views
 
 import de.jensd.fx.glyphs.fontawesome.FontAwesomeIcon
+import de.jensd.fx.glyphs.fontawesome.FontAwesomeIconView
 import javafx.beans.binding.Bindings
 import javafx.collections.ObservableList
 import javafx.scene.Node
@@ -8,10 +9,10 @@ import javafx.scene.Parent
 import javafx.scene.control.TitledPane
 import javafx.scene.input.MouseButton
 import javafx.scene.layout.TilePane
-import net.corda.client.fxutils.concatenate
-import net.corda.client.fxutils.map
-import net.corda.client.model.observableList
-import net.corda.client.model.writableValue
+import net.corda.client.jfx.model.observableList
+import net.corda.client.jfx.model.writableValue
+import net.corda.client.jfx.utils.concatenate
+import net.corda.client.jfx.utils.map
 import net.corda.explorer.model.CordaView
 import net.corda.explorer.model.CordaViewModel
 
@@ -29,7 +30,7 @@ class Dashboard : CordaView() {
     init {
         Bindings.bindContent(tilePane.children, widgetPanes)
         // Dynamically change column count and width according to the window size.
-        tilePane.widthProperty().addListener { e ->
+        tilePane.widthProperty().addListener { _ ->
             val prefWidth = 350
             val columns: Int = ((tilePane.width - 10) / prefWidth).toInt()
             tilePane.children.forEach { (it as? TitledPane)?.prefWidth = (tilePane.width - 10) / columns }
@@ -46,6 +47,7 @@ class Dashboard : CordaView() {
                         selectedView.value = view
                     }
                 }
+                it.icon?.let { graphic = FontAwesomeIconView(it).apply { glyphSize = 30.0 } }
             }
         }
     }

@@ -6,26 +6,7 @@ apply plugin: 'net.corda.plugins.publish-utils'
 apply plugin: 'net.corda.plugins.cordformation'
 apply plugin: 'maven-publish'
 
-repositories {
-    mavenLocal()
-    mavenCentral()
-    jcenter()
-    maven {
-        url 'https://dl.bintray.com/kotlin/exposed'
-    }
-}
-
 sourceSets {
-    main {
-        resources {
-            srcDir "../../config/dev"
-        }
-    }
-    test {
-        resources {
-            srcDir "../../config/test"
-        }
-    }
     integrationTest {
         kotlin {
             compileClasspath += main.output + test.output
@@ -41,53 +22,44 @@ configurations {
 }
 
 dependencies {
-    compile "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    compile "org.jetbrains.kotlin:kotlin-stdlib-jre8:$kotlin_version"
     testCompile "junit:junit:$junit_version"
 
     // Corda integration dependencies
-    runtime project(path: ":node:capsule", configuration: 'runtimeArtifacts')
-    compile project(':core')
-    compile project(':test-utils')
-
-    // Javax is required for webapis
-    compile "org.glassfish.jersey.core:jersey-server:${jersey_version}"
-
-    // GraphStream: For visualisation (required by ExampleClientRPC app)
-    compile "org.graphstream:gs-core:1.3"
-    compile("org.graphstream:gs-ui:1.3") {
-        exclude group: "bouncycastle"
-    }
+    cordaCompile project(path: ":node:capsule", configuration: 'runtimeArtifacts')
+    cordaCompile project(path: ":webserver:webcapsule", configuration: 'runtimeArtifacts')
+    cordaCompile project(':core')
+    cordaCompile project(':webserver')
+    cordaCompile project(':test-utils')
 }
 
-task deployNodes(type: net.corda.plugins.Cordform, dependsOn: ['build']) {
-    ext.rpcUsers = [ ['user' : "demo", 'password' : "demo", 'permissions' : ["StartFlow.net.corda.flows.FinalityFlow"]] ]
+task deployNodes(type: net.corda.plugins.Cordform, dependsOn: ['jar']) {
+    ext.rpcUsers = [['username': "demo", 'password': "demo", 'permissions': ["StartFlow.net.corda.attachmentdemo.AttachmentDemoFlow"]]]
 
     directory "./build/nodes"
-    networkMap "Controller"
+    networkMap "CN=Notary Service,O=R3,OU=corda,L=London,C=GB"
     node {
-        name "Controller"
-        nearestCity "London"
-        advertisedServices ["corda.notary.validating"]
-        artemisPort 10002
-        webPort 10003
+        name "CN=Notary Service,O=R3,OU=corda,L=London,C=GB"
+        advertisedServices["corda.notary.validating"]
+        p2pPort 10002
+        rpcPort 10003
         cordapps = []
         rpcUsers = ext.rpcUsers
     }
     node {
-        name "Bank A"
-        nearestCity "London"
+        name "CN=Bank A,O=Bank A,L=London,C=GB"
         advertisedServices = []
-        artemisPort 10004
-        webPort 10005
+        p2pPort 10005
+        rpcPort 10006
         cordapps = []
         rpcUsers = ext.rpcUsers
     }
     node {
-        name "Bank B"
-        nearestCity "New York"
+        name "CN=Bank B,O=Bank B,L=New York,C=US"
         advertisedServices = []
-        artemisPort 10006
-        webPort 10007
+        p2pPort 10008
+        rpcPort 10009
+        webPort 10010
         cordapps = []
         rpcUsers = ext.rpcUsers
     }

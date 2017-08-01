@@ -10,9 +10,10 @@ import io.requery.sql.platform.H2
 import io.requery.util.function.Function
 import io.requery.util.function.Supplier
 import net.corda.core.schemas.requery.converters.InstantConverter
+import net.corda.core.schemas.requery.converters.SecureHashConverter
 import net.corda.core.schemas.requery.converters.StateRefConverter
 import net.corda.core.schemas.requery.converters.VaultStateStatusConverter
-import org.jetbrains.exposed.sql.transactions.TransactionManager
+import net.corda.node.utilities.DatabaseTransactionManager
 import java.sql.Connection
 import java.util.*
 import java.util.concurrent.Executor
@@ -69,6 +70,8 @@ class KotlinConfigurationTransactionWrapper(private val model: EntityModel,
         val vaultStateStatusConverter = VaultStateStatusConverter()
         customMapping.addConverter(vaultStateStatusConverter, vaultStateStatusConverter.mappedType)
         customMapping.addConverter(StateRefConverter(), StateRefConverter::getMappedType.javaClass)
+        customMapping.addConverter(SecureHashConverter(), SecureHashConverter::getMappedType.javaClass)
+
         return customMapping
     }
 
@@ -125,13 +128,7 @@ class KotlinConfigurationTransactionWrapper(private val model: EntityModel,
     }
 
     class CordaDataSourceConnectionProvider(val dataSource: DataSource) : ConnectionProvider {
-        override fun getConnection(): Connection {
-            val tx = TransactionManager.manager.currentOrNull()
-            return CordaConnection(
-                    tx?.connection ?:
-                    TransactionManager.manager.newTransaction(Connection.TRANSACTION_REPEATABLE_READ).connection
-            )
-        }
+        override fun getConnection(): Connection = CordaConnection(DatabaseTransactionManager.current().connection)
     }
 
     class CordaConnection(val connection: Connection) : Connection by connection {

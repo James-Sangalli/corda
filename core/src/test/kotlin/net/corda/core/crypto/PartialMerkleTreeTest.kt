@@ -1,23 +1,29 @@
 package net.corda.core.crypto
 
-
-import com.esotericsoftware.kryo.serializers.MapSerializer
+import com.esotericsoftware.kryo.KryoException
 import net.corda.contracts.asset.Cash
 import net.corda.core.contracts.*
 import net.corda.core.crypto.SecureHash.Companion.zeroHash
-import net.corda.core.serialization.*
-import net.corda.core.transactions.*
-import net.corda.core.utilities.*
-import net.corda.testing.MEGA_CORP
-import net.corda.testing.MEGA_CORP_PUBKEY
-import net.corda.testing.ledger
+import net.corda.core.identity.Party
+import net.corda.core.serialization.deserialize
+import net.corda.core.serialization.serialize
+import net.corda.core.transactions.WireTransaction
+import net.corda.testing.*
 import org.junit.Test
-import java.util.*
+import java.security.PublicKey
+import java.util.function.Predicate
 import kotlin.test.*
 
-class PartialMerkleTreeTest {
+class PartialMerkleTreeTest : TestDependencyInjectionBase() {
     val nodes = "abcdef"
-    val hashed = nodes.map { it.serialize().sha256() }
+    val hashed = nodes.map {
+        initialiseTestSerialization()
+        try {
+            it.serialize().sha256()
+        } finally {
+            resetTestSerialization()
+        }
+    }
     val expectedRoot = MerkleTree.getMerkleTree(hashed.toMutableList() + listOf(zeroHash, zeroHash)).hash
     val merkleTree = MerkleTree.getMerkleTree(hashed)
 
@@ -26,22 +32,22 @@ class PartialMerkleTreeTest {
             output("MEGA_CORP cash") {
                 Cash.State(
                         amount = 1000.DOLLARS `issued by` MEGA_CORP.ref(1, 1),
-                        owner = MEGA_CORP_PUBKEY
+                        owner = MEGA_CORP
                 )
             }
             output("dummy cash 1") {
                 Cash.State(
                         amount = 900.DOLLARS `issued by` MEGA_CORP.ref(1, 1),
-                        owner = DUMMY_PUBKEY_1
+                        owner = MINI_CORP
                 )
             }
         }
 
         transaction {
             input("MEGA_CORP cash")
-            output("MEGA_CORP cash".output<Cash.State>().copy(owner = DUMMY_PUBKEY_1))
+            output("MEGA_CORP cash".output<Cash.State>().copy(owner = MINI_CORP))
             command(MEGA_CORP_PUBKEY) { Cash.Commands.Move() }
-            timestamp(TEST_TX_TIME)
+            timeWindow(TEST_TX_TIME)
             this.verifies()
         }
     }
@@ -57,7 +63,7 @@ class PartialMerkleTreeTest {
 
     @Test
     fun `building Merkle tree - no hashes`() {
-        assertFailsWith<MerkleTreeException> { MerkleTree.Companion.getMerkleTree(emptyList()) }
+        assertFailsWith<MerkleTreeException> { MerkleTree.getMerkleTree(emptyList()) }
     }
 
     @Test
@@ -81,7 +87,7 @@ class PartialMerkleTreeTest {
     fun `check full tree`() {
         val h = SecureHash.randomSHA256()
         val left = MerkleTree.Node(h, MerkleTree.Node(h, MerkleTree.Leaf(h), MerkleTree.Leaf(h)),
-                    MerkleTree.Node(h, MerkleTree.Leaf(h), MerkleTree.Leaf(h)))
+                MerkleTree.Node(h, MerkleTree.Leaf(h), MerkleTree.Leaf(h)))
         val right = MerkleTree.Node(h, MerkleTree.Leaf(h), MerkleTree.Leaf(h))
         val tree = MerkleTree.Node(h, left, right)
         assertFailsWith<MerkleTreeException> { PartialMerkleTree.build(tree, listOf(h)) }
@@ -90,30 +96,33 @@ class PartialMerkleTreeTest {
     }
 
     @Test
-    fun `building Merkle tree for a transaction`() {
+    fun `building Merkle tree for a tx and nonce test`() {
         fun filtering(elem: Any): Boolean {
             return when (elem) {
                 is StateRef -> true
-                is TransactionState<*> -> elem.data.participants[0].keys == DUMMY_PUBKEY_1.keys
-                is Command -> MEGA_CORP_PUBKEY in elem.signers
-                is Timestamp -> true
-                is CompositeKey -> elem == MEGA_CORP_PUBKEY
+                is TransactionState<*> -> elem.data.participants[0].owningKey.keys == MINI_CORP_PUBKEY.keys
+                is Command<*> -> MEGA_CORP_PUBKEY in elem.signers
+                is TimeWindow -> true
+                is PublicKey -> elem == MEGA_CORP_PUBKEY
                 else -> false
             }
         }
-        val mt = testTx.buildFilteredTransaction(::filtering)
-        val leaves = mt.filteredLeaves
-        val d = WireTransaction.deserialize(testTx.serialized)
+
+        val d = testTx.serialize().deserialize()
         assertEquals(testTx.id, d.id)
-        assertEquals(1, leaves.commands.size)
-        assertEquals(1, leaves.outputs.size)
+
+        val mt = testTx.buildFilteredTransaction(Predicate(::filtering))
+        val leaves = mt.filteredLeaves
+
         assertEquals(1, leaves.inputs.size)
-        assertEquals(1, leaves.mustSign.size)
         assertEquals(0, leaves.attachments.size)
-        assertTrue(mt.filteredLeaves.timestamp != null)
-        assertEquals(null, mt.filteredLeaves.type)
-        assertEquals(null, mt.filteredLeaves.notary)
-        assert(mt.verify())
+        assertEquals(1, leaves.outputs.size)
+        assertEquals(1, leaves.commands.size)
+        assertNull(mt.filteredLeaves.notary)
+        assertNotNull(mt.filteredLeaves.timeWindow)
+        assertNull(mt.filteredLeaves.privacySalt)
+        assertEquals(4, leaves.nonces.size)
+        assertTrue(mt.verify())
     }
 
     @Test
@@ -125,33 +134,45 @@ class PartialMerkleTreeTest {
 
     @Test
     fun `nothing filtered`() {
-        val mt = testTx.buildFilteredTransaction( {false} )
+        val mt = testTx.buildFilteredTransaction(Predicate { false })
         assertTrue(mt.filteredLeaves.attachments.isEmpty())
         assertTrue(mt.filteredLeaves.commands.isEmpty())
         assertTrue(mt.filteredLeaves.inputs.isEmpty())
         assertTrue(mt.filteredLeaves.outputs.isEmpty())
-        assertTrue(mt.filteredLeaves.timestamp == null)
+        assertTrue(mt.filteredLeaves.timeWindow == null)
+        assertTrue(mt.filteredLeaves.availableComponents.isEmpty())
+        assertTrue(mt.filteredLeaves.availableComponentHashes.isEmpty())
+        assertTrue(mt.filteredLeaves.nonces.isEmpty())
         assertFailsWith<MerkleTreeException> { mt.verify() }
+
+        // Including only privacySalt still results to an empty FilteredTransaction.
+        fun filterPrivacySalt(elem: Any): Boolean = elem is PrivacySalt
+        val mt2 = testTx.buildFilteredTransaction(Predicate(::filterPrivacySalt))
+        assertTrue(mt2.filteredLeaves.privacySalt == null)
+        assertTrue(mt2.filteredLeaves.availableComponents.isEmpty())
+        assertTrue(mt2.filteredLeaves.availableComponentHashes.isEmpty())
+        assertTrue(mt2.filteredLeaves.nonces.isEmpty())
+        assertFailsWith<MerkleTreeException> { mt2.verify() }
     }
 
-    // Partial Merkle Tree building tests
+    // Partial Merkle Tree building tests.
     @Test
     fun `build Partial Merkle Tree, only left nodes branch`() {
         val inclHashes = listOf(hashed[3], hashed[5])
         val pmt = PartialMerkleTree.build(merkleTree, inclHashes)
-        assert(pmt.verify(merkleTree.hash, inclHashes))
+        assertTrue(pmt.verify(merkleTree.hash, inclHashes))
     }
 
     @Test
     fun `build Partial Merkle Tree, include zero leaves`() {
         val pmt = PartialMerkleTree.build(merkleTree, emptyList())
-        assert(pmt.verify(merkleTree.hash, emptyList()))
+        assertTrue(pmt.verify(merkleTree.hash, emptyList()))
     }
 
     @Test
     fun `build Partial Merkle Tree, include all leaves`() {
         val pmt = PartialMerkleTree.build(merkleTree, hashed)
-        assert(pmt.verify(merkleTree.hash, hashed))
+        assertTrue(pmt.verify(merkleTree.hash, hashed))
     }
 
     @Test
@@ -208,27 +229,20 @@ class PartialMerkleTreeTest {
         assertFalse(pmt.verify(wrongRoot, inclHashes))
     }
 
-    @Test
-    fun `hash map serialization`() {
+    @Test(expected = KryoException::class)
+    fun `hash map serialization not allowed`() {
         val hm1 = hashMapOf("a" to 1, "b" to 2, "c" to 3, "e" to 4)
-        assert(serializedHash(hm1) == serializedHash(hm1.serialize().deserialize())) // It internally uses the ordered HashMap extension.
-        val kryo = extendKryoHash(createKryo())
-        assertTrue(kryo.getSerializer(HashMap::class.java) is OrderedSerializer)
-        assertTrue(kryo.getSerializer(LinkedHashMap::class.java) is MapSerializer)
-        val hm2 = hm1.serialize(kryo).deserialize(kryo)
-        assert(hm1.hashCode() == hm2.hashCode())
+        hm1.serialize()
     }
 
-    private fun makeSimpleCashWtx(notary: Party, timestamp: Timestamp? = null, attachments: List<SecureHash> = emptyList()): WireTransaction {
+    private fun makeSimpleCashWtx(notary: Party, timeWindow: TimeWindow? = null, attachments: List<SecureHash> = emptyList()): WireTransaction {
         return WireTransaction(
                 inputs = testTx.inputs,
                 attachments = attachments,
                 outputs = testTx.outputs,
                 commands = testTx.commands,
                 notary = notary,
-                signers = listOf(MEGA_CORP_PUBKEY, DUMMY_PUBKEY_1),
-                type = TransactionType.General(),
-                timestamp = timestamp
+                timeWindow = timeWindow
         )
     }
 }

@@ -1,17 +1,20 @@
 package net.corda.contracts.universal
 
-import net.corda.core.contracts.BusinessCalendar
-import net.corda.core.contracts.Tenor
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
+import net.corda.contracts.BusinessCalendar
+import net.corda.contracts.Tenor
+import net.corda.core.identity.Party
+import net.corda.core.serialization.CordaSerializable
 import java.lang.reflect.Type
 import java.math.BigDecimal
+import java.security.PublicKey
 import java.time.Instant
 import java.time.LocalDate
 import java.util.*
 
+@CordaSerializable
 interface Perceivable<T>
 
+@CordaSerializable
 enum class Comparison {
     LT, LTE, GT, GTE
 }
@@ -127,6 +130,7 @@ infix fun Perceivable<BigDecimal>.gte(n: BigDecimal) = perceivableComparison(thi
 infix fun Perceivable<BigDecimal>.lte(n: Double) = perceivableComparison(this, Comparison.LTE, const(BigDecimal(n)))
 infix fun Perceivable<BigDecimal>.gte(n: Double) = perceivableComparison(this, Comparison.GTE, const(BigDecimal(n)))
 
+@CordaSerializable
 enum class Operation {
     PLUS, MINUS, TIMES, DIV
 }
@@ -149,7 +153,7 @@ operator fun Perceivable<BigDecimal>.div(n: Double) = PerceivableOperation(this,
 operator fun Perceivable<Int>.plus(n: Int) = PerceivableOperation(this, Operation.PLUS, const(n))
 operator fun Perceivable<Int>.minus(n: Int) = PerceivableOperation(this, Operation.MINUS, const(n))
 
-data class TerminalEvent(val reference: Party, val source: CompositeKey) : Perceivable<Boolean>
+data class TerminalEvent(val reference: Party, val source: PublicKey) : Perceivable<Boolean>
 
 // todo: holidays
 data class Interest(val amount: Perceivable<BigDecimal>, val dayCountConvention: String,

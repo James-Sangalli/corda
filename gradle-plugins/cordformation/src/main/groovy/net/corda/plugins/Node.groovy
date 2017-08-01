@@ -1,30 +1,21 @@
 package net.corda.plugins
 
 import com.typesafe.config.*
+import net.corda.cordform.CordformNode
+import org.bouncycastle.asn1.x500.X500Name
+import org.bouncycastle.asn1.x500.style.BCStyle
 import org.gradle.api.Project
 import java.nio.charset.StandardCharsets
 import java.nio.file.Files
+import java.nio.file.Path
 
 /**
  * Represents a node that will be installed.
  */
-class Node {
-    static final String JAR_NAME = 'corda.jar'
-    static final String DEFAULT_HOST = 'localhost'
+class Node extends CordformNode {
+    static final String NODEJAR_NAME = 'corda.jar'
+    static final String WEBJAR_NAME = 'corda-webserver.jar'
 
-    /**
-     * Name of the node.
-     */
-    public String name
-    /**
-     * A list of advertised services ID strings.
-     */
-    protected List<String> advertisedServices = []
-
-    /**
-     * If running a distributed notary, a list of node addresses for joining the Raft cluster
-     */
-    protected List<String> notaryClusterAddresses = []
     /**
      * Set the list of CorDapps to install to the plugins directory. Each cordapp is a fully qualified Maven
      * dependency name, eg: com.example:product-name:0.1
@@ -32,38 +23,9 @@ class Node {
      * @note Your app will be installed by default and does not need to be included here.
      */
     protected List<String> cordapps = []
-    /**
-     * Set the RPC users for this node. This configuration block allows arbitrary configuration.
-     * The recommended current structure is:
-     * [[['user': "username_here", 'password': "password_here", 'permissions': ["permissions_here"]]]
-     * The above is a list to a map of keys to values using Groovy map and list shorthands.
-     *
-     * @note Incorrect configurations will not cause a DSL error.
-     */
-    protected List<Map<String, Object>> rpcUsers = []
 
-    private Config config = ConfigFactory.empty()
-    private File nodeDir
+    protected File nodeDir
     private Project project
-
-    /**
-     * Set the name of the node.
-     *
-     * @param name The node name.
-     */
-    void name(String name) {
-        this.name = name
-        config = config.withValue("myLegalName", ConfigValueFactory.fromAnyRef(name))
-    }
-
-    /**
-     * Set the nearest city to the node.
-     *
-     * @param nearestCity The name of the nearest city to the node.
-     */
-    void nearestCity(String nearestCity) {
-        config = config.withValue("nearestCity", ConfigValueFactory.fromAnyRef(nearestCity))
-    }
 
     /**
      * Sets whether this node will use HTTPS communication.
@@ -74,18 +36,15 @@ class Node {
         config = config.withValue("useHTTPS", ConfigValueFactory.fromAnyRef(isHttps))
     }
 
-    void useTestClock(Boolean useTestClock) {
-        config = config.withValue("useTestClock", ConfigValueFactory.fromAnyRef(useTestClock))
+    /**
+     * Sets the H2 port for this node
+     */
+    void h2Port(Integer h2Port) {
+        config = config.withValue("h2port", ConfigValueFactory.fromAnyRef(h2Port))
     }
 
-    /**
-     * Set the artemis port for this node.
-     *
-     * @param artemisPort The artemis messaging queue port.
-     */
-    void artemisPort(Integer artemisPort) {
-        config = config.withValue("artemisAddress",
-                ConfigValueFactory.fromAnyRef("$DEFAULT_HOST:$artemisPort".toString()))
+    void useTestClock(Boolean useTestClock) {
+        config = config.withValue("useTestClock", ConfigValueFactory.fromAnyRef(useTestClock))
     }
 
     /**
@@ -96,14 +55,6 @@ class Node {
     void webPort(Integer webPort) {
         config = config.withValue("webAddress",
                 ConfigValueFactory.fromAnyRef("$DEFAULT_HOST:$webPort".toString()))
-    }
-
-    /**
-     * Set the port which to bind the Copycat (Raft) node to
-     */
-    void notaryNodePort(Integer notaryPort) {
-        config = config.withValue("notaryNodeAddress",
-                ConfigValueFactory.fromAnyRef("$DEFAULT_HOST:$notaryPort".toString()))
     }
 
     /**
@@ -121,27 +72,48 @@ class Node {
         config = config.withValue("networkMapService", ConfigValueFactory.fromMap(networkMapService))
     }
 
+    /**
+     * Set the SSHD port for this node.
+     *
+     * @param sshdPort The SSHD port.
+     */
+    void sshdPort(Integer sshdPort) {
+        config = config.withValue("sshdAddress",
+                ConfigValueFactory.fromAnyRef("$DEFAULT_HOST:$sshdPort".toString()))
+    }
+
     Node(Project project) {
         this.project = project
     }
 
-    void build(File rootDir) {
-        nodeDir = new File(rootDir, name.replaceAll("\\s",""))
+    protected void rootDir(Path rootDir) {
+        def dirName
+        try {
+            X500Name x500Name = new X500Name(name)
+            dirName = x500Name.getRDNs(BCStyle.CN).getAt(0).getFirst().getValue().toString()
+        } catch(IllegalArgumentException ignore) {
+            // Can't parse as an X500 name, use the full string
+            dirName = name
+        }
+        nodeDir = new File(rootDir.toFile(), dirName.replaceAll("\\s",""))
+    }
+
+    protected void build() {
         configureRpcUsers()
-        installCordaJAR()
+        installCordaJar()
+        installWebserverJar()
         installBuiltPlugin()
         installCordapps()
-        installDependencies()
         installConfig()
     }
 
     /**
      * Get the artemis address for this node.
      *
-     * @return This node's artemis address.
+     * @return This node's P2P address.
      */
-    String getArtemisAddress() {
-        return config.getString("artemisAddress")
+    String getP2PAddress() {
+        return config.getString("p2pAddress")
     }
 
     /**
@@ -154,12 +126,25 @@ class Node {
     /**
      * Installs the corda fat JAR to the node directory.
      */
-    private void installCordaJAR() {
+    private void installCordaJar() {
         def cordaJar = verifyAndGetCordaJar()
         project.copy {
             from cordaJar
             into nodeDir
-            rename cordaJar.name, JAR_NAME
+            rename cordaJar.name, NODEJAR_NAME
+            fileMode 0755
+        }
+    }
+
+    /**
+     * Installs the corda webserver JAR to the node directory
+     */
+    private void installWebserverJar() {
+        def webJar = verifyAndGetWebserverJar()
+        project.copy {
+            from webJar
+            into nodeDir
+            rename webJar.name, WEBJAR_NAME
         }
     }
 
@@ -187,29 +172,13 @@ class Node {
     }
 
     /**
-     * Installs other dependencies to this node's dependencies directory.
-     */
-    private void installDependencies() {
-        def cordaJar = verifyAndGetCordaJar()
-        def depsDir = new File(nodeDir, "dependencies")
-        def coreDeps = project.zipTree(cordaJar).getFiles().collect { it.getName() }
-        def appDeps = project.configurations.runtime.filter {
-            it != cordaJar && !project.configurations.cordapp.contains(it) && !coreDeps.contains(it.getName())
-        }
-        project.copy {
-            from appDeps
-            into depsDir
-        }
-    }
-
-    /**
      * Installs the configuration file to this node's directory and detokenises it.
      */
     private void installConfig() {
         // Adding required default values
-        config = config.withValue('extraAdvertisedServiceIds', ConfigValueFactory.fromAnyRef(advertisedServices.join(',')))
+        config = config.withValue('extraAdvertisedServiceIds', ConfigValueFactory.fromIterable(advertisedServices*.toString()))
         if (notaryClusterAddresses.size() > 0) {
-            config = config.withValue('notaryClusterAddresses', ConfigValueFactory.fromIterable(notaryClusterAddresses))
+            config = config.withValue('notaryClusterAddresses', ConfigValueFactory.fromIterable(notaryClusterAddresses*.toString()))
         }
         def configFileText = config.root().render(new ConfigRenderOptions(false, false, true, false)).split("\n").toList()
 
@@ -231,14 +200,32 @@ class Node {
      */
     private File verifyAndGetCordaJar() {
         def maybeCordaJAR = project.configurations.runtime.filter {
-            it.toString().contains("corda-${project.corda_version}.jar")
+            it.toString().contains("corda-${project.corda_release_version}.jar") || it.toString().contains("corda-enterprise-${project.corda_release_version}.jar")
         }
         if (maybeCordaJAR.size() == 0) {
-            throw new RuntimeException("No Corda Capsule JAR found. Have you deployed the Corda project to Maven? Looked for \"corda-${project.corda_version}.jar\"")
+            throw new RuntimeException("No Corda Capsule JAR found. Have you deployed the Corda project to Maven? Looked for \"corda-${project.corda_release_version}.jar\"")
         } else {
             def cordaJar = maybeCordaJAR.getSingleFile()
             assert(cordaJar.isFile())
             return cordaJar
+        }
+    }
+
+    /**
+     * Find the corda JAR amongst the dependencies
+     *
+     * @return A file representing the Corda webserver JAR
+     */
+    private File verifyAndGetWebserverJar() {
+        def maybeJar = project.configurations.runtime.filter {
+            it.toString().contains("corda-webserver-${project.corda_release_version}.jar")
+        }
+        if (maybeJar.size() == 0) {
+            throw new RuntimeException("No Corda Webserver JAR found. Have you deployed the Corda project to Maven? Looked for \"corda-webserver-${project.corda_release_version}.jar\"")
+        } else {
+            def jar = maybeJar.getSingleFile()
+            assert(jar.isFile())
+            return jar
         }
     }
 

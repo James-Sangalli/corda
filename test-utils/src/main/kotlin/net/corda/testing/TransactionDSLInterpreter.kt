@@ -1,12 +1,12 @@
 package net.corda.testing
 
 import net.corda.core.contracts.*
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
+import net.corda.testing.contracts.DummyContract
 import net.corda.core.crypto.SecureHash
-import net.corda.core.seconds
+import net.corda.core.identity.Party
+import net.corda.core.utilities.seconds
 import net.corda.core.transactions.TransactionBuilder
-import net.corda.core.utilities.DUMMY_NOTARY
+import java.security.PublicKey
 import java.time.Duration
 import java.time.Instant
 import java.util.*
@@ -48,13 +48,13 @@ interface TransactionDSLInterpreter : Verifies, OutputStateLookup {
      * @param signers The signer public keys.
      * @param commandData The contents of the command.
      */
-    fun _command(signers: List<CompositeKey>, commandData: CommandData)
+    fun _command(signers: List<PublicKey>, commandData: CommandData)
 
     /**
-     * Adds a timestamp to the transaction.
-     * @param data The [TimestampCommand].
+     * Sets the time-window of the transaction.
+     * @param data the [TimeWindow] (validation window).
      */
-    fun timestamp(data: Timestamp)
+    fun timeWindow(data: TimeWindow)
 
     /**
      * Creates a local scoped copy of the transaction.
@@ -79,11 +79,12 @@ class TransactionDSL<out T : TransactionDSLInterpreter>(val interpreter: T) : Tr
         val transaction = ledgerInterpreter._unverifiedTransaction(null, TransactionBuilder(notary = DUMMY_NOTARY)) {
             output { state }
             // Add a dummy randomised output so that the transaction id differs when issuing the same state multiple times
-            val nonceState = DummyContract.SingleOwnerState(Random().nextInt(), DUMMY_NOTARY.owningKey)
+            val nonceState = DummyContract.SingleOwnerState(Random().nextInt(), DUMMY_NOTARY)
             output { nonceState }
         }
         input(transaction.outRef<ContractState>(0).ref)
     }
+
     fun input(stateClosure: () -> ContractState) = input(stateClosure())
 
     /**
@@ -92,6 +93,7 @@ class TransactionDSL<out T : TransactionDSLInterpreter>(val interpreter: T) : Tr
     @JvmOverloads
     fun output(label: String? = null, notary: Party = DUMMY_NOTARY, encumbrance: Int? = null, contractStateClosure: () -> ContractState) =
             _output(label, notary, encumbrance, contractStateClosure())
+
     /**
      * @see TransactionDSLInterpreter._output
      */
@@ -104,19 +106,20 @@ class TransactionDSL<out T : TransactionDSLInterpreter>(val interpreter: T) : Tr
     /**
      * @see TransactionDSLInterpreter._command
      */
-    fun command(vararg signers: CompositeKey, commandDataClosure: () -> CommandData) =
+    fun command(vararg signers: PublicKey, commandDataClosure: () -> CommandData) =
             _command(listOf(*signers), commandDataClosure())
+
     /**
      * @see TransactionDSLInterpreter._command
      */
-    fun command(signer: CompositeKey, commandData: CommandData) = _command(listOf(signer), commandData)
+    fun command(signer: PublicKey, commandData: CommandData) = _command(listOf(signer), commandData)
 
     /**
-     * Adds a timestamp command to the transaction.
-     * @param time The [Instant] of the [TimestampCommand].
-     * @param tolerance The tolerance of the [TimestampCommand].
+     * Sets the [TimeWindow] of the transaction.
+     * @param time The [Instant] of the [TimeWindow].
+     * @param tolerance The tolerance of the [TimeWindow].
      */
     @JvmOverloads
-    fun timestamp(time: Instant, tolerance: Duration = 30.seconds) =
-            timestamp(Timestamp(time, tolerance))
+    fun timeWindow(time: Instant, tolerance: Duration = 30.seconds) =
+            timeWindow(TimeWindow.withTolerance(time, tolerance))
 }

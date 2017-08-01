@@ -6,81 +6,88 @@ import co.paralleluniverse.fibers.Suspendable
 import co.paralleluniverse.strands.Strand
 import com.google.common.util.concurrent.ListenableFuture
 import com.google.common.util.concurrent.SettableFuture
-import net.corda.core.abbreviate
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
-import net.corda.core.flows.FlowException
-import net.corda.core.flows.FlowLogic
-import net.corda.core.flows.FlowStateMachine
-import net.corda.core.flows.StateMachineRunId
-import net.corda.core.random63BitValue
+import net.corda.core.crypto.random63BitValue
+import net.corda.core.flows.*
+import net.corda.core.identity.Party
+import net.corda.core.internal.FlowStateMachine
+import net.corda.core.internal.abbreviate
+import net.corda.core.internal.staticField
 import net.corda.core.transactions.SignedTransaction
-import net.corda.core.utilities.ProgressTracker
-import net.corda.core.utilities.UntrustworthyData
-import net.corda.core.utilities.debug
-import net.corda.core.utilities.trace
+import net.corda.core.utilities.*
+import net.corda.node.services.api.FlowAppAuditEvent
+import net.corda.node.services.api.FlowPermissionAuditEvent
 import net.corda.node.services.api.ServiceHubInternal
-import net.corda.node.utilities.StrandLocalTransactionManager
-import net.corda.node.utilities.createDatabaseTransaction
-import org.jetbrains.exposed.sql.Database
-import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.transactions.TransactionManager
+import net.corda.node.services.statemachine.FlowSessionState.Initiating
+import net.corda.node.utilities.CordaPersistence
+import net.corda.node.utilities.DatabaseTransaction
+import net.corda.node.utilities.DatabaseTransactionManager
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import java.sql.Connection
 import java.sql.SQLException
 import java.util.*
+import java.util.concurrent.TimeUnit
+
+class FlowPermissionException(message: String) : FlowException(message)
 
 class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
                               val logic: FlowLogic<R>,
-                              scheduler: FiberScheduler) : Fiber<Unit>(id.toString(), scheduler), FlowStateMachine<R> {
+                              scheduler: FiberScheduler,
+                              override val flowInitiator: FlowInitiator) : Fiber<Unit>(id.toString(), scheduler), FlowStateMachine<R> {
     companion object {
         // Used to work around a small limitation in Quasar.
-        private val QUASAR_UNBLOCKER = run {
-            val field = Fiber::class.java.getDeclaredField("SERIALIZER_BLOCKER")
-            field.isAccessible = true
-            field.get(null)
-        }
+        private val QUASAR_UNBLOCKER = Fiber::class.staticField<Any>("SERIALIZER_BLOCKER").value
 
         /**
          * Return the current [FlowStateMachineImpl] or null if executing outside of one.
          */
         fun currentStateMachine(): FlowStateMachineImpl<*>? = Strand.currentStrand() as? FlowStateMachineImpl<*>
+
+        /**
+         * Provide a mechanism to sleep within a Strand without locking any transactional state
+         */
+        // TODO: inlined due to an intermittent Quasar error (to be fully investigated)
+        @Suppress("NOTHING_TO_INLINE")
+        @Suspendable
+        inline fun sleep(millis: Long) {
+            if (currentStateMachine() != null) {
+                val db = DatabaseTransactionManager.dataSource
+                DatabaseTransactionManager.current().commit()
+                DatabaseTransactionManager.current().close()
+                Strand.sleep(millis)
+                DatabaseTransactionManager.dataSource = db
+                DatabaseTransactionManager.newTransaction()
+            } else Strand.sleep(millis)
+        }
     }
 
     // These fields shouldn't be serialised, so they are marked @Transient.
     @Transient override lateinit var serviceHub: ServiceHubInternal
-    @Transient internal lateinit var database: Database
+    @Transient internal lateinit var database: CordaPersistence
     @Transient internal lateinit var actionOnSuspend: (FlowIORequest) -> Unit
-    @Transient internal lateinit var actionOnEnd: (Throwable?, Boolean) -> Unit
+    @Transient internal lateinit var actionOnEnd: (Try<R>, Boolean) -> Unit
     @Transient internal var fromCheckpoint: Boolean = false
-    @Transient private var txTrampoline: Transaction? = null
+    @Transient private var txTrampoline: DatabaseTransaction? = null
 
-    @Transient private var _logger: Logger? = null
     /**
      * Return the logger for this state machine. The logger name incorporates [id] and so including it in the log message
      * is not necessary.
      */
-    override val logger: Logger get() {
-        return _logger ?: run {
-            val l = LoggerFactory.getLogger("net.corda.flow.$id")
-            _logger = l
-            return l
-        }
-    }
+    override val logger: Logger = LoggerFactory.getLogger("net.corda.flow.$id")
 
     @Transient private var _resultFuture: SettableFuture<R>? = SettableFuture.create<R>()
     /** This future will complete when the call method returns. */
-    override val resultFuture: ListenableFuture<R> get() {
-        return _resultFuture ?: run {
-            val f = SettableFuture.create<R>()
-            _resultFuture = f
-            return f
-        }
-    }
+    override val resultFuture: ListenableFuture<R>
+        get() = _resultFuture ?: SettableFuture.create<R>().also { _resultFuture = it }
 
     // This state IS serialised, as we need it to know what the fiber is waiting for.
     internal val openSessions = HashMap<Pair<FlowLogic<*>, Party>, FlowSession>()
     internal var waitingForResponse: WaitingRequest? = null
+    internal var hasSoftLockedStates: Boolean = false
+        set(value) {
+            if (value) field = value else throw IllegalArgumentException("Can only set to true")
+        }
 
     init {
         logic.stateMachine = this
@@ -90,45 +97,50 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
     override fun run() {
         createTransaction()
         logger.debug { "Calling flow: $logic" }
+        val startTime = System.nanoTime()
         val result = try {
-            logic.call()
+            val r = logic.call()
+            // Only sessions which have done a single send and nothing else will block here
+            openSessions.values
+                    .filter { it.state is Initiating }
+                    .forEach { it.waitForConfirmation() }
+            r
         } catch (e: FlowException) {
+            recordDuration(startTime, success = false)
             // Check if the FlowException was propagated by looking at where the stack trace originates (see suspendAndExpectReceive).
             val propagated = e.stackTrace[0].className == javaClass.name
             processException(e, propagated)
-            logger.debug(if (propagated) "Flow ended due to receiving exception" else "Flow finished with exception", e)
+            logger.warn(if (propagated) "Flow ended due to receiving exception" else "Flow finished with exception", e)
             return
         } catch (t: Throwable) {
+            recordDuration(startTime, success = false)
             logger.warn("Terminated by unexpected exception", t)
             processException(t, false)
             return
         }
 
-        // Only sessions which have a single send and nothing else will block here
-        openSessions.values
-                .filter { it.state is FlowSessionState.Initiating }
-                .forEach { it.waitForConfirmation() }
+        recordDuration(startTime)
         // This is to prevent actionOnEnd being called twice if it throws an exception
-        actionOnEnd(null, false)
+        actionOnEnd(Try.Success(result), false)
         _resultFuture?.set(result)
         logic.progressTracker?.currentStep = ProgressTracker.DONE
-        logger.debug { "Flow finished with result $result" }
+        logger.debug { "Flow finished with result ${result.toString().abbreviate(300)}" }
     }
 
     private fun createTransaction() {
         // Make sure we have a database transaction
-        createDatabaseTransaction(database)
-        logger.trace { "Starting database transaction ${TransactionManager.currentOrNull()} on ${Strand.currentStrand()}" }
+        database.createTransaction()
+        logger.trace { "Starting database transaction ${DatabaseTransactionManager.currentOrNull()} on ${Strand.currentStrand()}" }
     }
 
     private fun processException(exception: Throwable, propagated: Boolean) {
-        actionOnEnd(exception, propagated)
+        actionOnEnd(Try.Failure(exception), propagated)
         _resultFuture?.setException(exception)
         logic.progressTracker?.endWithError(exception)
     }
 
     internal fun commitTransaction() {
-        val transaction = TransactionManager.current()
+        val transaction = DatabaseTransactionManager.current()
         try {
             logger.trace { "Committing database transaction $transaction on ${Strand.currentStrand()}." }
             transaction.commit()
@@ -145,11 +157,12 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
     override fun <T : Any> sendAndReceive(receiveType: Class<T>,
                                           otherParty: Party,
                                           payload: Any,
-                                          sessionFlow: FlowLogic<*>): UntrustworthyData<T> {
+                                          sessionFlow: FlowLogic<*>,
+                                          retrySend: Boolean): UntrustworthyData<T> {
         logger.debug { "sendAndReceive(${receiveType.name}, $otherParty, ${payload.toString().abbreviate(300)}) ..." }
         val session = getConfirmedSession(otherParty, sessionFlow)
         val sessionData = if (session == null) {
-            val newSession = startNewSession(otherParty, sessionFlow, payload, waitForConfirmation = true)
+            val newSession = startNewSession(otherParty, sessionFlow, payload, waitForConfirmation = true, retryable = retrySend)
             // Only do a receive here as the session init has carried the payload
             receiveInternal<SessionData>(newSession, receiveType)
         } else {
@@ -188,7 +201,7 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
     override fun waitForLedgerCommit(hash: SecureHash, sessionFlow: FlowLogic<*>): SignedTransaction {
         logger.debug { "waitForLedgerCommit($hash) ..." }
         suspend(WaitForLedgerCommit(hash, sessionFlow.stateMachine as FlowStateMachineImpl<*>))
-        val stx = serviceHub.storageService.validatedTransactions.getTransaction(hash)
+        val stx = serviceHub.validatedTransactions.getTransaction(hash)
         if (stx != null) {
             logger.debug { "Transaction $hash committed to ledger" }
             return stx
@@ -205,6 +218,37 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
         throw IllegalStateException("We were resumed after waiting for $hash but it wasn't found in our local storage")
     }
 
+    // TODO Dummy implementation of access to application specific permission controls and audit logging
+    override fun checkFlowPermission(permissionName: String, extraAuditData: Map<String, String>) {
+        val permissionGranted = true // TODO define permission control service on ServiceHubInternal and actually check authorization.
+        val checkPermissionEvent = FlowPermissionAuditEvent(
+            serviceHub.clock.instant(),
+            flowInitiator,
+            "Flow Permission Required: $permissionName",
+            extraAuditData,
+            logic.javaClass,
+            id,
+            permissionName,
+            permissionGranted)
+        serviceHub.auditService.recordAuditEvent(checkPermissionEvent)
+        if (!permissionGranted) {
+            throw FlowPermissionException("User $flowInitiator not permissioned for $permissionName on flow $id")
+        }
+    }
+
+    // TODO Dummy implementation of access to application specific audit logging
+    override fun recordAuditEvent(eventType: String, comment: String, extraAuditData: Map<String,String>) {
+        val flowAuditEvent = FlowAppAuditEvent(
+                    serviceHub.clock.instant(),
+                    flowInitiator,
+                    comment,
+                    extraAuditData,
+                    logic.javaClass,
+                id,
+                eventType)
+        serviceHub.auditService.recordAuditEvent(flowAuditEvent)
+    }
+
     /**
      * This method will suspend the state machine and wait for incoming session init response from other party.
      */
@@ -215,7 +259,7 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
             state = FlowSessionState.Initiated(peerParty, sessionInitResponse.initiatedSessionId)
         } else {
             sessionInitResponse as SessionReject
-            throw FlowException("Party ${state.sendToParty} rejected session request: ${sessionInitResponse.errorMessage}")
+            throw UnexpectedFlowEndException("Party ${state.sendToParty} rejected session request: ${sessionInitResponse.errorMessage}")
         }
     }
 
@@ -263,12 +307,16 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
      * multiple public keys, but we **don't support multiple nodes advertising the same legal identity**.
      */
     @Suspendable
-    private fun startNewSession(otherParty: Party, sessionFlow: FlowLogic<*>, firstPayload: Any?, waitForConfirmation: Boolean): FlowSession {
+    private fun startNewSession(otherParty: Party,
+                                sessionFlow: FlowLogic<*>,
+                                firstPayload: Any?,
+                                waitForConfirmation: Boolean,
+                                retryable: Boolean = false): FlowSession {
         logger.trace { "Initiating a new session with $otherParty" }
-        val session = FlowSession(sessionFlow, random63BitValue(), null, FlowSessionState.Initiating(otherParty))
+        val session = FlowSession(sessionFlow, random63BitValue(), null, FlowSessionState.Initiating(otherParty), retryable)
         openSessions[Pair(sessionFlow, otherParty)] = session
-        val counterpartyFlow = sessionFlow.getCounterpartyMarker(otherParty).name
-        val sessionInit = SessionInit(session.ourSessionId, counterpartyFlow, firstPayload)
+        val (version, initiatingFlowClass) = sessionFlow.javaClass.flowVersionAndInitiatingClass
+        val sessionInit = SessionInit(session.ourSessionId, initiatingFlowClass.name, version, firstPayload)
         sendInternal(session, sessionInit)
         if (waitForConfirmation) {
             session.waitForConfirmation()
@@ -277,7 +325,6 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
     }
 
     @Suspendable
-
     private fun <M : ExistingSessionMessage> waitForMessage(receiveRequest: ReceiveRequest<M>): ReceivedSessionMessage<M> {
         return receiveRequest.suspendAndExpectReceive().confirmReceiveType(receiveRequest)
     }
@@ -314,7 +361,7 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
                 session.erroredEnd(message)
             } else {
                 val expectedType = receiveRequest.userReceiveType?.name ?: receiveType.simpleName
-                throw FlowSessionException("Counterparty flow on ${session.state.sendToParty} has completed without " +
+                throw UnexpectedFlowEndException("Counterparty flow on ${session.state.sendToParty} has completed without " +
                         "sending a $expectedType")
             }
         } else {
@@ -328,7 +375,7 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
             (end.errorResponse as java.lang.Throwable).fillInStackTrace()
             throw end.errorResponse
         } else {
-            throw FlowSessionException("Counterparty flow on ${state.sendToParty} had an internal error and has terminated")
+            throw UnexpectedFlowEndException("Counterparty flow on ${state.sendToParty} had an internal error and has terminated")
         }
     }
 
@@ -336,17 +383,16 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
     private fun suspend(ioRequest: FlowIORequest) {
         // We have to pass the thread local database transaction across via a transient field as the fiber park
         // swaps them out.
-        txTrampoline = TransactionManager.currentOrNull()
-        StrandLocalTransactionManager.setThreadLocalTx(null)
+        txTrampoline =  DatabaseTransactionManager.setThreadLocalTx(null)
         if (ioRequest is WaitingRequest)
             waitingForResponse = ioRequest
 
         var exceptionDuringSuspend: Throwable? = null
-        parkAndSerialize { f, s ->
+        parkAndSerialize { _, _ ->
             logger.trace { "Suspended on $ioRequest" }
             // restore the Tx onto the ThreadLocal so that we can commit the ensuing checkpoint to the DB
             try {
-                StrandLocalTransactionManager.setThreadLocalTx(txTrampoline)
+                DatabaseTransactionManager.setThreadLocalTx(txTrampoline)
                 txTrampoline = null
                 actionOnSuspend(ioRequest)
             } catch (t: Throwable) {
@@ -380,5 +426,35 @@ class FlowStateMachineImpl<R>(override val id: StateMachineRunId,
         } catch (t: Throwable) {
             logger.error("Error during resume", t)
         }
+    }
+
+    /**
+     * Records the duration of this flow – from call() to completion or failure.
+     * Note that the duration will include the time the flow spent being parked, and not just the total
+     * execution time.
+     */
+    private fun recordDuration(startTime: Long, success: Boolean = true) {
+        val timerName = "FlowDuration.${if (success) "Success" else "Failure"}.${logic.javaClass.name}"
+        val timer = serviceHub.monitoringService.metrics.timer(timerName)
+        // Start time gets serialized along with the fiber when it suspends
+        val duration = System.nanoTime() - startTime
+        timer.update(duration, TimeUnit.NANOSECONDS)
+    }
+}
+
+@Suppress("UNCHECKED_CAST")
+val Class<out FlowLogic<*>>.flowVersionAndInitiatingClass: Pair<Int, Class<out FlowLogic<*>>> get() {
+    var current: Class<*> = this
+    var found: Pair<Int, Class<out FlowLogic<*>>>? = null
+    while (true) {
+        val annotation = current.getDeclaredAnnotation(InitiatingFlow::class.java)
+        if (annotation != null) {
+            if (found != null) throw IllegalArgumentException("${InitiatingFlow::class.java.name} can only be annotated once")
+            require(annotation.version > 0) { "Flow versions have to be greater or equal to 1" }
+            found = annotation.version to (current as Class<out FlowLogic<*>>)
+        }
+        current = current.superclass
+            ?: return found
+            ?: throw IllegalArgumentException("$name as an initiating flow must be annotated with ${InitiatingFlow::class.java.name}")
     }
 }

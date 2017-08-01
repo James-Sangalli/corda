@@ -1,21 +1,23 @@
 package net.corda.core.contracts
 
 import net.corda.core.contracts.clauses.Clause
-import net.corda.core.crypto.AnonymousParty
-import net.corda.core.crypto.CompositeKey
-import net.corda.core.crypto.Party
 import net.corda.core.crypto.SecureHash
+import net.corda.core.crypto.secureRandomBytes
 import net.corda.core.flows.FlowLogicRef
 import net.corda.core.flows.FlowLogicRefFactory
-import net.corda.core.node.services.ServiceType
-import net.corda.core.serialization.OpaqueBytes
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
+import net.corda.core.serialization.CordaSerializable
+import net.corda.core.serialization.MissingAttachmentsException
+import net.corda.core.serialization.SerializeAsTokenContext
 import net.corda.core.serialization.serialize
-import net.corda.core.transactions.TransactionBuilder
+import net.corda.core.transactions.LedgerTransaction
+import net.corda.core.utilities.OpaqueBytes
 import java.io.FileNotFoundException
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.PublicKey
-import java.time.Duration
 import java.time.Instant
 import java.util.jar.JarInputStream
 
@@ -24,37 +26,7 @@ interface NamedByHash {
     val id: SecureHash
 }
 
-/**
- * Interface for state objects that support being netted with other state objects.
- */
-interface BilateralNettableState<N : BilateralNettableState<N>> {
-    /**
-     * Returns an object used to determine if two states can be subject to close-out netting. If two states return
-     * equal objects, they can be close out netted together.
-     */
-    val bilateralNetState: Any
-
-    /**
-     * Perform bilateral netting of this state with another state. The two states must be compatible (as in
-     * bilateralNetState objects are equal).
-     */
-    fun net(other: N): N
-}
-
-/**
- * Interface for state objects that support being netted with other state objects.
- */
-interface MultilateralNettableState<out T : Any> {
-    /**
-     * Returns an object used to determine if two states can be subject to close-out netting. If two states return
-     * equal objects, they can be close out netted together.
-     */
-    val multilateralNetState: T
-}
-
-interface NettableState<N : BilateralNettableState<N>, T : Any> : BilateralNettableState<N>,
-        MultilateralNettableState<T>
-
+// DOCSTART 1
 /**
  * A contract state (or just "state") contains opaque data used by a contract program. It can be thought of as a disk
  * file that the program can use to persist data across transactions. States are immutable: once created they are never
@@ -62,6 +34,7 @@ interface NettableState<N : BilateralNettableState<N>, T : Any> : BilateralNetta
  * notary is responsible for ensuring there is no "double spending" by only signing a transaction if the input states
  * are all free.
  */
+@CordaSerializable
 interface ContractState {
     /**
      * An instance of the contract class that will verify this state.
@@ -107,20 +80,22 @@ interface ContractState {
      * A _participant_ is any party that is able to consume this state in a valid transaction.
      *
      * The list of participants is required for certain types of transactions. For example, when changing the notary
-     * for this state ([TransactionType.NotaryChange]), every participant has to be involved and approve the transaction
+     * for this state, every participant has to be involved and approve the transaction
      * so that they receive the updated state, and don't end up in a situation where they can no longer use a state
      * they possess, since someone consumed that state during the notary change process.
      *
-     * The participants list should normally be derived from the contents of the state. E.g. for [Cash] the participants
-     * list should just contain the owner.
+     * The participants list should normally be derived from the contents of the state.
      */
-    val participants: List<CompositeKey>
+    val participants: List<AbstractParty>
 }
+// DOCEND 1
 
+// DOCSTART 4
 /**
  * A wrapper for [ContractState] containing additional platform-level state information.
  * This is the definitive state that is stored on the ledger and used in transaction outputs.
  */
+@CordaSerializable
 data class TransactionState<out T : ContractState> @JvmOverloads constructor(
         /** The custom contract state */
         val data: T,
@@ -143,14 +118,8 @@ data class TransactionState<out T : ContractState> @JvmOverloads constructor(
          * Note that an encumbered state that is being consumed must have its encumbrance consumed in the same transaction,
          * otherwise the transaction is not valid.
          */
-        val encumbrance: Int? = null) {
-
-    /**
-     * Copies the underlying state, replacing the notary field with the new value.
-     * To replace the notary, we need an approval (signature) from _all_ participants of the [ContractState].
-     */
-    fun withNotary(newNotary: Party) = TransactionState(this.data, newNotary, encumbrance)
-}
+        val encumbrance: Int? = null)
+// DOCEND 4
 
 /** Wraps the [ContractState] in a [TransactionState] object */
 infix fun <T : ContractState> T.`with notary`(newNotary: Party) = withNotary(newNotary)
@@ -158,18 +127,13 @@ infix fun <T : ContractState> T.`with notary`(newNotary: Party) = withNotary(new
 infix fun <T : ContractState> T.withNotary(newNotary: Party) = TransactionState(this, newNotary)
 
 /**
- * Marker interface for data classes that represent the issuance state for a contract. These are intended as templates
- * from which the state object is initialised.
- */
-interface IssuanceDefinition
-
-/**
  * Definition for an issued product, which can be cash, a cash-like thing, assets, or generally anything else that's
  * quantifiable with integer quantities.
  *
- * @param P the type of product underlying the definition, for example [Currency].
+ * @param P the type of product underlying the definition, for example [java.util.Currency].
  */
-data class Issued<out P>(val issuer: PartyAndReference, val product: P) {
+@CordaSerializable
+data class Issued<out P : Any>(val issuer: PartyAndReference, val product: P) {
     override fun toString() = "$product issued by $issuer"
 }
 
@@ -178,18 +142,20 @@ data class Issued<out P>(val issuer: PartyAndReference, val product: P) {
  * cares about specific issuers with code that will accept any, or which is imposing issuer constraints via some
  * other mechanism and the additional type safety is not wanted.
  */
-fun <T> Amount<Issued<T>>.withoutIssuer(): Amount<T> = Amount(quantity, token.product)
+fun <T : Any> Amount<Issued<T>>.withoutIssuer(): Amount<T> = Amount(quantity, token.product)
 
+// DOCSTART 3
 /**
  * A contract state that can have a single owner.
  */
 interface OwnableState : ContractState {
     /** There must be a MoveCommand signed by this key to claim the amount */
-    val owner: CompositeKey
+    val owner: AbstractParty
 
     /** Copies the underlying data structure, replacing the owner field with this new value and leaving the rest alone */
-    fun withNewOwner(newOwner: CompositeKey): Pair<CommandData, OwnableState>
+    fun withNewOwner(newOwner: AbstractParty): Pair<CommandData, OwnableState>
 }
+// DOCEND 3
 
 /** Something which is scheduled to happen at a point in time */
 interface Scheduled {
@@ -197,8 +163,8 @@ interface Scheduled {
 }
 
 /**
- * Represents a contract state (unconsumed output) of type [LinearState] and a point in time that a lifecycle event is expected to take place
- * for that contract state.
+ * Represents a contract state (unconsumed output) of type [LinearState] and a point in time that a lifecycle event is
+ * expected to take place for that contract state.
  *
  * This is effectively the input to a scheduler, which wakes up at that point in time and asks the contract state what
  * lifecycle processing needs to take place.  e.g. a fixing or a late payment etc.
@@ -206,10 +172,11 @@ interface Scheduled {
 data class ScheduledStateRef(val ref: StateRef, override val scheduledAt: Instant) : Scheduled
 
 /**
- * This class represents the lifecycle activity that a contract state of type [LinearState] would like to perform at a given point in time.
- * e.g. run a fixing flow.
+ * This class represents the lifecycle activity that a contract state of type [LinearState] would like to perform at a
+ * given point in time. e.g. run a fixing flow.
  *
- * Note the use of [FlowLogicRef] to represent a safe way to transport a [FlowLogic] out of the contract sandbox.
+ * Note the use of [FlowLogicRef] to represent a safe way to transport a [net.corda.core.flows.FlowLogic] out of the
+ * contract sandbox.
  *
  * Currently we support only flow based activities as we expect there to be a transaction generated off the back of
  * the activity, otherwise we have to start tracking secondary state on the platform of which scheduled activities
@@ -218,6 +185,7 @@ data class ScheduledStateRef(val ref: StateRef, override val scheduledAt: Instan
  */
 data class ScheduledActivity(val logicRef: FlowLogicRef, override val scheduledAt: Instant) : Scheduled
 
+// DOCSTART 2
 /**
  * A state that evolves by superseding itself, all of which share the common "linearId".
  *
@@ -233,14 +201,15 @@ interface LinearState : ContractState {
 
     /**
      * True if this should be tracked by our vault(s).
-     * */
+     */
     fun isRelevant(ourKeys: Set<PublicKey>): Boolean
 
     /**
      * Standard clause to verify the LinearState safety properties.
      */
-    class ClauseVerifier<S : LinearState, C : CommandData>() : Clause<S, C, Unit>() {
-        override fun verify(tx: TransactionForContract,
+    @CordaSerializable
+    class ClauseVerifier<in S : LinearState, C : CommandData> : Clause<S, C, Unit>() {
+        override fun verify(tx: LedgerTransaction,
                             inputs: List<S>,
                             outputs: List<S>,
                             commands: List<AuthenticatedObject<C>>,
@@ -248,13 +217,14 @@ interface LinearState : ContractState {
             val inputIds = inputs.map { it.linearId }.distinct()
             val outputIds = outputs.map { it.linearId }.distinct()
             requireThat {
-                "LinearStates are not merged" by (inputIds.count() == inputs.count())
-                "LinearStates are not split" by (outputIds.count() == outputs.count())
+                "LinearStates are not merged" using (inputIds.count() == inputs.count())
+                "LinearStates are not split" using (outputIds.count() == outputs.count())
             }
             return emptySet()
         }
     }
 }
+// DOCEND 2
 
 interface SchedulableState : ContractState {
     /**
@@ -269,64 +239,6 @@ interface SchedulableState : ContractState {
     fun nextScheduledActivity(thisStateRef: StateRef, flowLogicRefFactory: FlowLogicRefFactory): ScheduledActivity?
 }
 
-/**
- * Interface representing an agreement that exposes various attributes that are common. Implementing it simplifies
- * implementation of general flows that manipulate many agreement types.
- */
-interface DealState : LinearState {
-    /** Human readable well known reference (e.g. trade reference) */
-    val ref: String
-
-    /**
-     * Exposes the Parties involved in a generic way.
-     *
-     * Appears to duplicate [participants] a property of [ContractState]. However [participants] only holds public keys.
-     * Currently we need to hard code Party objects into [ContractState]s. [Party] objects are a wrapper for public
-     * keys which also contain some identity information about the public key owner. You can keep track of individual
-     * parties by adding a property for each one to the state, or you can append parties to the [parties] list if you
-     * are implementing [DealState]. We need to do this as identity management in Corda is currently incomplete,
-     * therefore the only way to record identity information is in the [ContractState]s themselves. When identity
-     * management is completed, parties to a transaction will only record public keys in the [DealState] and through a
-     * separate process exchange certificates to ascertain identities. Thus decoupling identities from
-     * [ContractState]s.
-     * */
-    val parties: List<AnonymousParty>
-
-    /**
-     * Generate a partial transaction representing an agreement (command) to this deal, allowing a general
-     * deal/agreement flow to generate the necessary transaction for potential implementations.
-     *
-     * TODO: Currently this is the "inception" transaction but in future an offer of some description might be an input state ref
-     *
-     * TODO: This should more likely be a method on the Contract (on a common interface) and the changes to reference a
-     * Contract instance from a ContractState are imminent, at which point we can move this out of here.
-     */
-    fun generateAgreement(notary: Party): TransactionBuilder
-}
-
-/**
- * Interface adding fixing specific methods.
- */
-interface FixableDealState : DealState {
-    /**
-     * When is the next fixing and what is the fixing for?
-     */
-    fun nextFixingOf(): FixOf?
-
-    /**
-     * What oracle service to use for the fixing
-     */
-    val oracleType: ServiceType
-
-    /**
-     * Generate a fixing command for this deal and fix.
-     *
-     * TODO: This would also likely move to methods on the Contract once the changes to reference
-     * the Contract from the ContractState are in.
-     */
-    fun generateFix(ptx: TransactionBuilder, oldState: StateAndRef<*>, fix: Fix)
-}
-
 /** Returns the SHA-256 hash of the serialised contents of this state (not cached!) */
 fun ContractState.hash(): SecureHash = SecureHash.sha256(serialize().bytes)
 
@@ -334,12 +246,18 @@ fun ContractState.hash(): SecureHash = SecureHash.sha256(serialize().bytes)
  * A stateref is a pointer (reference) to a state, this is an equivalent of an "outpoint" in Bitcoin. It records which
  * transaction defined the state and where in that transaction it was.
  */
+@CordaSerializable
+// DOCSTART 8
 data class StateRef(val txhash: SecureHash, val index: Int) {
     override fun toString() = "$txhash($index)"
 }
+// DOCEND 8
 
 /** A StateAndRef is simply a (state, ref) pair. For instance, a vault (which holds available assets) contains these. */
+@CordaSerializable
+// DOCSTART 7
 data class StateAndRef<out T : ContractState>(val state: TransactionState<T>, val ref: StateRef)
+// DOCEND 7
 
 /** Filters a list of [StateAndRef] objects according to the type of the states */
 inline fun <reified T : ContractState> Iterable<StateAndRef<ContractState>>.filterStatesOfType(): List<StateAndRef<T>> {
@@ -350,12 +268,13 @@ inline fun <reified T : ContractState> Iterable<StateAndRef<ContractState>>.filt
  * Reference to something being stored or issued by a party e.g. in a vault or (more likely) on their normal
  * ledger. The reference is intended to be encrypted so it's meaningless to anyone other than the party.
  */
-data class PartyAndReference(val party: AnonymousParty, val reference: OpaqueBytes) {
-    constructor(party: Party, reference: OpaqueBytes) : this(party.toAnonymous(), reference)
-    override fun toString() = "${party}$reference"
+@CordaSerializable
+data class PartyAndReference(val party: AbstractParty, val reference: OpaqueBytes) {
+    override fun toString() = "$party$reference"
 }
 
 /** Marker interface for classes that represent commands */
+@CordaSerializable
 interface CommandData
 
 /** Commands that inherit from this are intended to have no data items: it's only their presence that matters. */
@@ -365,12 +284,14 @@ abstract class TypeOnlyCommandData : CommandData {
 }
 
 /** Command data/content plus pubkey pair: the signature is stored at the end of the serialized bytes */
-data class Command(val value: CommandData, val signers: List<CompositeKey>) {
+@CordaSerializable
+data class Command<T : CommandData>(val value: T, val signers: List<PublicKey>) {
+    // TODO Introduce NonEmptyList?
     init {
         require(signers.isNotEmpty())
     }
 
-    constructor(data: CommandData, key: CompositeKey) : this(data, listOf(key))
+    constructor(data: T, key: PublicKey) : this(data, listOf(key))
 
     private fun commandDataToString() = value.toString().let { if (it.contains("@")) it.replace('$', '.').split("@")[0] else it }
     override fun toString() = "${commandDataToString()} with pubkeys ${signers.joinToString()}"
@@ -392,46 +313,30 @@ interface MoveCommand : CommandData {
     val contractHash: SecureHash?
 }
 
-/** A common netting command for contracts whose states can be netted. */
-interface NetCommand : CommandData {
-    /** The type of netting to apply, see [NetType] for options. */
-    val type: NetType
-}
-
 /** Indicates that this transaction replaces the inputs contract state to another contract state */
 data class UpgradeCommand(val upgradedContractClass: Class<out UpgradedContract<*, *>>) : CommandData
 
+// DOCSTART 6
 /** Wraps an object that was signed by a public key, which may be a well known/recognised institutional key. */
+@CordaSerializable
 data class AuthenticatedObject<out T : Any>(
-        val signers: List<CompositeKey>,
+        val signers: List<PublicKey>,
         /** If any public keys were recognised, the looked up institutions are available here */
         val signingParties: List<Party>,
         val value: T
 )
+// DOCEND 6
 
-/**
- * If present in a transaction, contains a time that was verified by the uniqueness service. The true time must be
- * between (after, before).
- */
-data class Timestamp(val after: Instant?, val before: Instant?) {
-    init {
-        if (after == null && before == null)
-            throw IllegalArgumentException("At least one of before/after must be specified")
-        if (after != null && before != null)
-            check(after <= before)
-    }
-
-    constructor(time: Instant, tolerance: Duration) : this(time - tolerance, time + tolerance)
-
-    val midpoint: Instant get() = after!! + Duration.between(after, before!!).dividedBy(2)
-}
-
+// DOCSTART 5
 /**
  * Implemented by a program that implements business logic on the shared ledger. All participants run this code for
- * every [LedgerTransaction] they see on the network, for every input and output state. All contracts must accept the
- * transaction for it to be accepted: failure of any aborts the entire thing. The time is taken from a trusted
- * timestamp attached to the transaction itself i.e. it is NOT necessarily the current time.
+ * every [net.corda.core.transactions.LedgerTransaction] they see on the network, for every input and output state. All
+ * contracts must accept the transaction for it to be accepted: failure of any aborts the entire thing. The time is taken
+ * from a trusted time-window attached to the transaction itself i.e. it is NOT necessarily the current time.
+ *
+ * TODO: Contract serialization is likely to change, so the annotation is likely temporary.
  */
+@CordaSerializable
 interface Contract {
     /**
      * Takes an object that represents a state transition, and ensures the inputs/outputs/commands make sense.
@@ -440,7 +345,7 @@ interface Contract {
      * existing contract code.
      */
     @Throws(IllegalArgumentException::class)
-    fun verify(tx: TransactionForContract)
+    fun verify(tx: LedgerTransaction)
 
     /**
      * Unparsed reference to the natural language contract that this code is supposed to express (usually a hash of
@@ -448,6 +353,7 @@ interface Contract {
      */
     val legalContractReference: SecureHash
 }
+// DOCEND 5
 
 /**
  * Interface which can upgrade state objects issued by a contract to a new state object issued by a different contract.
@@ -479,26 +385,72 @@ interface UpgradedContract<in OldState : ContractState, out NewState : ContractS
  * - Facts generated by oracles which might be reused a lot
  */
 interface Attachment : NamedByHash {
+
     fun open(): InputStream
-    fun openAsJAR() = JarInputStream(open())
+
+    fun openAsJAR(): JarInputStream {
+        val stream = open()
+        try {
+            return JarInputStream(stream)
+        } catch (t: Throwable) {
+            stream.use { throw t }
+        }
+    }
 
     /**
      * Finds the named file case insensitively and copies it to the output stream.
      *
      * @throws FileNotFoundException if the given path doesn't exist in the attachment.
      */
-    fun extractFile(path: String, outputTo: OutputStream) {
-        val p = path.toLowerCase().split('\\', '/')
-        openAsJAR().use { jar ->
-            while (true) {
-                val e = jar.nextJarEntry ?: break
-                if (e.name.toLowerCase().split('\\', '/') == p) {
-                    jar.copyTo(outputTo)
-                    return
-                }
-                jar.closeEntry()
+    fun extractFile(path: String, outputTo: OutputStream) = openAsJAR().use { it.extractFile(path, outputTo) }
+}
+
+abstract class AbstractAttachment(dataLoader: () -> ByteArray) : Attachment {
+    companion object {
+        fun SerializeAsTokenContext.attachmentDataLoader(id: SecureHash): () -> ByteArray {
+            return {
+                val a = serviceHub.attachments.openAttachment(id) ?: throw MissingAttachmentsException(listOf(id))
+                (a as? AbstractAttachment)?.attachmentData ?: a.open().use { it.readBytes() }
             }
         }
-        throw FileNotFoundException()
+    }
+
+    protected val attachmentData: ByteArray by lazy(dataLoader)
+    override fun open(): InputStream = attachmentData.inputStream()
+    override fun equals(other: Any?) = other === this || other is Attachment && other.id == this.id
+    override fun hashCode() = id.hashCode()
+    override fun toString() = "${javaClass.simpleName}(id=$id)"
+}
+
+@Throws(IOException::class)
+fun JarInputStream.extractFile(path: String, outputTo: OutputStream) {
+    val p = path.toLowerCase().split('\\', '/')
+    while (true) {
+        val e = nextJarEntry ?: break
+        if (!e.isDirectory && e.name.toLowerCase().split('\\', '/') == p) {
+            copyTo(outputTo)
+            return
+        }
+        closeEntry()
+    }
+    throw FileNotFoundException(path)
+}
+
+/**
+ * A privacy salt is required to compute nonces per transaction component in order to ensure that an adversary cannot
+ * use brute force techniques and reveal the content of a merkle-leaf hashed value.
+ * Because this salt serves the role of the seed to compute nonces, its size and entropy should be equal to the
+ * underlying hash function used for Merkle tree generation, currently [SHA256], which has an output of 32 bytes.
+ * There are two constructors, one that generates a new 32-bytes random salt, and another that takes a [ByteArray] input.
+ * The latter is required in cases where the salt value needs to be pre-generated (agreed between transacting parties),
+ * but it is highlighted that one should always ensure it has sufficient entropy.
+ */
+@CordaSerializable
+class PrivacySalt(bytes: ByteArray) : OpaqueBytes(bytes) {
+    constructor() : this(secureRandomBytes(32))
+
+    init {
+        require(bytes.size == 32) { "Privacy salt should be 32 bytes." }
+        require(!bytes.all { it == 0.toByte() }) { "Privacy salt should not be all zeros." }
     }
 }

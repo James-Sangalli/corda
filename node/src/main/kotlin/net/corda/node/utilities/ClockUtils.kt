@@ -3,12 +3,12 @@ package net.corda.node.utilities
 import co.paralleluniverse.fibers.Suspendable
 import co.paralleluniverse.strands.SettableFuture
 import com.google.common.util.concurrent.ListenableFuture
+import net.corda.core.internal.until
 import net.corda.core.then
 import rx.Observable
 import rx.Subscriber
 import rx.subscriptions.Subscriptions
 import java.time.Clock
-import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicLong
@@ -32,14 +32,6 @@ import com.google.common.util.concurrent.SettableFuture as GuavaSettableFuture
 abstract class MutableClock : Clock() {
 
     private val _version = AtomicLong(0L)
-
-    /**
-     * This tracks how many direct mutations of "now" have occurred for this [Clock], but not the passage of time.
-     *
-     * It starts at zero, and increments by one per mutation.
-     */
-    val mutationCount: Long
-        get() = _version.get()
 
     /**
      * This is an observer on the mutation count of this [Clock], which reflects the occurence of mutations.
@@ -71,7 +63,8 @@ abstract class MutableClock : Clock() {
 
 /**
  * Wait until the given [Future] is complete or the deadline is reached, with support for [MutableClock] implementations
- * used in demos or testing.  This will substitute a Fiber compatible Future so the current [Strand] is not blocked.
+ * used in demos or testing.  This will substitute a Fiber compatible Future so the current
+ * [co.paralleluniverse.strands.Strand] is not blocked.
  *
  * @return true if the [Future] is complete, false if the deadline was reached.
  */
@@ -87,7 +80,7 @@ fun Clock.awaitWithDeadline(deadline: Instant, future: Future<*> = GuavaSettable
         } else {
             null
         }
-        nanos = Duration.between(this.instant(), deadline).toNanos()
+        nanos = (instant() until deadline).toNanos()
         if (nanos > 0) {
             try {
                 // This will return when it times out, or when the clock mutates or when when the original future completes.
@@ -120,7 +113,7 @@ private fun <T : Any> makeStrandFriendlySettableFuture(future: Future<T>): Setta
         settable
     } else if (future is CompletableFuture) {
         val settable = SettableFuture<Boolean>()
-        future.whenComplete(BiConsumer { value, throwable -> settable.set(true) })
+        future.whenComplete(BiConsumer { _, _ -> settable.set(true) })
         settable
     } else {
         throw IllegalArgumentException("Cannot make future $future Fiber friendly.")

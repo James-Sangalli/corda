@@ -111,6 +111,7 @@
     -fx-cursor: hand;
     -fx-background-color: -color-1;
     -fx-border-color: transparent;
+    -fx-border-radius: 2;
 }
 
 .tile .title .text, .tile:expanded .title .text {
@@ -123,14 +124,15 @@
     -fx-background-repeat: no-repeat;
     -fx-background-position: center center;
     -fx-cursor: hand;
-    -fx-padding: 0px;
+    -fx-padding: 5px;
     -fx-alignment: bottom-right;
     -fx-border-color: transparent; /*t r b l */
+    -fx-border-radius: 2;
 }
 
 .tile .label {
-    -fx-font-size: 2.4em;
-    -fx-padding: 20px;
+    -fx-font-size: 2.0em;
+    -fx-padding: 10px;
     -fx-text-fill: -color-0;
     -fx-font-weight: normal;
     -fx-text-alignment: right;
@@ -158,15 +160,15 @@
     -fx-background-color: -color-4;
 }
 
-.certificateButton.button, .certificateButton.button:hover{
+.certificateButton.button, .certificateButton.button:hover {
     -fx-background-color: transparent;
 }
 
-.certificateIcon{
+.certificateIcon {
     -fx-fill: -color-2;
 }
 
-.certificateIcon:hover{
+.certificateIcon:hover {
     -fx-fill: -color-3;
 }
 
@@ -253,6 +255,7 @@
 #setting-edit-label:hover .text, #setting-edit-label:hover .glyph-icon {
     -fx-fill: -color-4;
 }
+
 /* Styles for firing bullets between nodes in Network view. */
 .bullet {
     -fx-fill: black;
@@ -268,4 +271,48 @@
 
 .connection-bank-to-regulator {
     -fx-stroke: red;
+}
+
+.scroll-bar:horizontal .track,
+.scroll-bar:vertical .track {
+    -fx-background-color: transparent;
+    -fx-border-color: transparent;
+    -fx-background-radius: 0em;
+    -fx-border-radius: 2em;
+}
+
+.scroll-bar:horizontal .increment-button,
+.scroll-bar:horizontal .decrement-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0em;
+    -fx-padding: 0 0 10 0;
+}
+
+.scroll-bar:vertical .increment-button,
+.scroll-bar:vertical .decrement-button {
+    -fx-background-color: transparent;
+    -fx-background-radius: 0em;
+    -fx-padding: 0 10 0 0;
+}
+
+.scroll-bar .increment-arrow,
+.scroll-bar .decrement-arrow {
+    -fx-shape: " ";
+    -fx-padding: 0;
+}
+
+.scroll-bar:horizontal .thumb,
+.scroll-bar:vertical .thumb {
+    -fx-background-color: derive(black, 90%);
+    -fx-background-insets: 2, 0, 0;
+    -fx-background-radius: 2em;
+}
+
+.scroll-bar:vertical {
+    -fx-background-color: transparent;
+}
+
+/* Other */
+.identicon {
+    -fx-border-radius: 2;
 }

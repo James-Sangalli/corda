@@ -1,15 +1,15 @@
 package net.corda.node.services.persistence
 
-import net.corda.core.ThreadBox
-import net.corda.core.bufferUntilSubscribed
+import net.corda.core.internal.ThreadBox
+import net.corda.core.internal.bufferUntilSubscribed
 import net.corda.core.crypto.SecureHash
 import net.corda.core.flows.StateMachineRunId
-import net.corda.core.node.services.StateMachineRecordedTransactionMappingStorage
-import net.corda.core.node.services.StateMachineTransactionMapping
+import net.corda.core.messaging.DataFeed
+import net.corda.core.messaging.StateMachineTransactionMapping
+import net.corda.node.services.api.StateMachineRecordedTransactionMappingStorage
 import net.corda.node.utilities.*
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.statements.InsertStatement
-import rx.Observable
 import rx.subjects.PublishSubject
 import javax.annotation.concurrent.ThreadSafe
 
@@ -31,7 +31,7 @@ class DBTransactionMappingStorage : StateMachineRecordedTransactionMappingStorag
     private class TransactionMappingsMap : AbstractJDBCHashMap<SecureHash, StateMachineRunId, Table>(Table, loadOnInit = false) {
         override fun keyFromRow(row: ResultRow): SecureHash = row[table.txId]
 
-        override fun valueFromRow(row: ResultRow): StateMachineRunId = StateMachineRunId.wrap(row[table.stateMachineRunId])
+        override fun valueFromRow(row: ResultRow): StateMachineRunId = StateMachineRunId(row[table.stateMachineRunId])
 
         override fun addKeyToInsert(insert: InsertStatement, entry: Map.Entry<SecureHash, StateMachineRunId>, finalizables: MutableList<() -> Unit>) {
             insert[table.txId] = entry.key
@@ -42,10 +42,11 @@ class DBTransactionMappingStorage : StateMachineRecordedTransactionMappingStorag
         }
     }
 
-    private val mutex = ThreadBox(object {
+    private class InnerState {
         val stateMachineTransactionMap = TransactionMappingsMap()
-        val updates = PublishSubject.create<StateMachineTransactionMapping>()
-    })
+        val updates: PublishSubject<StateMachineTransactionMapping> = PublishSubject.create()
+    }
+    private val mutex = ThreadBox(InnerState())
 
     override fun addMapping(stateMachineRunId: StateMachineRunId, transactionId: SecureHash) {
         mutex.locked {
@@ -54,9 +55,9 @@ class DBTransactionMappingStorage : StateMachineRecordedTransactionMappingStorag
         }
     }
 
-    override fun track(): Pair<List<StateMachineTransactionMapping>, Observable<StateMachineTransactionMapping>> {
+    override fun track(): DataFeed<List<StateMachineTransactionMapping>, StateMachineTransactionMapping> {
         mutex.locked {
-            return Pair(
+            return DataFeed(
                     stateMachineTransactionMap.map { StateMachineTransactionMapping(it.value, it.key) },
                     updates.bufferUntilSubscribed().wrapWithDatabaseTransaction()
             )

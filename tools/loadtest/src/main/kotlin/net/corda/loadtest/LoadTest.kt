@@ -1,15 +1,16 @@
 package net.corda.loadtest
 
-import kotlinx.support.jdk8.collections.parallelStream
+import com.google.common.util.concurrent.RateLimiter
 import net.corda.client.mock.Generator
-import net.corda.core.div
-import net.corda.node.driver.PortAllocation
+import net.corda.client.rpc.notUsed
+import net.corda.core.crypto.toBase58String
 import net.corda.node.services.network.NetworkMapService
-import net.corda.node.services.transactions.ValidatingNotaryService
+import net.corda.testing.driver.PortAllocation
 import org.slf4j.LoggerFactory
 import java.util.*
+import java.util.concurrent.Callable
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.Executors
 
 private val log = LoggerFactory.getLogger(LoadTest::class.java)
 
@@ -62,6 +63,7 @@ data class LoadTest<T, S>(
             val parallelism: Int,
             val generateCount: Int,
             val clearDatabaseBeforeRun: Boolean,
+            val executionFrequency: Int?,
             val gatherFrequency: Int,
             val disruptionPatterns: List<List<DisruptionSpec>>
     )
@@ -78,36 +80,43 @@ data class LoadTest<T, S>(
             }
         }
 
+        val rateLimiter = parameters.executionFrequency?.let {
+            log.info("Execution rate limited to $it per second.")
+            RateLimiter.create(it.toDouble())
+        }
+        val executor = Executors.newFixedThreadPool(parameters.parallelism)
+
         parameters.disruptionPatterns.forEach { disruptions ->
             log.info("Running test '$testName' with disruptions ${disruptions.map { it.disruption.name }}")
             nodes.withDisruptions(disruptions, random) {
                 var state = nodes.gatherRemoteState(null)
                 var count = parameters.generateCount
                 var countSinceLastCheck = 0
+
                 while (count > 0) {
                     log.info("$count remaining commands, state:\n$state")
                     // Generate commands
                     val commands = nodes.generate(state, parameters.parallelism).generate(random).getOrThrow()
-                    require(commands.size > 0)
+                    require(commands.isNotEmpty())
                     log.info("Generated command batch of size ${commands.size}: $commands")
                     // Interpret commands
                     val newState = commands.fold(state, interpret)
                     // Execute commands
-                    val queue = ConcurrentLinkedQueue(commands)
-                    (1..parameters.parallelism).toList().parallelStream().forEach {
-                        var next = queue.poll()
-                        while (next != null) {
-                            log.info("Executing $next")
-                            try {
-                                nodes.execute(next)
-                                next = queue.poll()
-                            } catch (exception: Throwable) {
-                                val diagnostic = executeDiagnostic(state, newState, next, exception)
-                                log.error(diagnostic)
-                                throw Exception(diagnostic)
+                    executor.invokeAll(
+                            commands.map {
+                                Callable<Unit> {
+                                    rateLimiter?.acquire()
+                                    log.info("Executing $it")
+                                    try {
+                                        nodes.execute(it)
+                                    } catch (exception: Throwable) {
+                                        val diagnostic = executeDiagnostic(state, newState, it, exception)
+                                        log.error(diagnostic)
+                                        throw Exception(diagnostic)
+                                    }
+                                }
                             }
-                        }
-                    }
+                    )
                     countSinceLastCheck += commands.size
                     if (countSinceLastCheck >= parameters.gatherFrequency) {
                         log.info("Checking consistency...")
@@ -130,7 +139,7 @@ data class LoadTest<T, S>(
                 log.info("'$testName' done!")
             }
         }
-
+        executor.shutdown()
     }
 
     companion object {
@@ -144,9 +153,9 @@ data class LoadTest<T, S>(
 }
 
 data class Nodes(
-        val notary: NodeHandle,
-        val networkMap: NodeHandle,
-        val simpleNodes: List<NodeHandle>
+        val notary: NodeConnection,
+        val networkMap: NodeConnection,
+        val simpleNodes: List<NodeConnection>
 ) {
     val allNodes by lazy { (listOf(notary, networkMap) + simpleNodes).associateBy { it.info }.values }
 }
@@ -158,49 +167,44 @@ fun runLoadTests(configuration: LoadTestConfiguration, tests: List<Pair<LoadTest
     val seed = configuration.seed ?: Random().nextLong()
     log.info("Using seed $seed")
     val random = SplittableRandom(seed)
-    connectToNodes(
-            configuration.sshUser,
-            configuration.nodeHosts.map { it to configuration.remoteNodeDirectory / "certificates" },
-            configuration.remoteMessagingPort,
-            PortAllocation.Incremental(configuration.localTunnelStartingPort),
-            configuration.localCertificatesBaseDirectory
-    ) { connections ->
+
+    val remoteNodes = configuration.nodeHosts.map { hostname ->
+        configuration.let {
+            RemoteNode(hostname, it.remoteSystemdServiceName, it.sshUser, it.rpcUser, it.rpcPort, it.remoteNodeDirectory)
+        }
+    }
+
+    connectToNodes(remoteNodes, PortAllocation.Incremental(configuration.localTunnelStartingPort)) { connections ->
         log.info("Connected to all nodes!")
-        val hostNodeHandleMap = ConcurrentHashMap<String, NodeHandle>()
+        val hostNodeMap = ConcurrentHashMap<String, NodeConnection>()
         connections.parallelStream().forEach { connection ->
-            log.info("Getting node info of ${connection.hostName}")
-            val nodeInfo = connection.proxy.nodeIdentity()
-            log.info("Got node info of ${connection.hostName}: $nodeInfo!")
-            val otherNodeInfos = connection.proxy.networkMapUpdates().first
-            val pubkeysString = otherNodeInfos.map {
+            log.info("Getting node info of ${connection.remoteNode.hostname}")
+            val info = connection.info
+            log.info("Got node info of ${connection.remoteNode.hostname}: $info!")
+            val (otherInfo, infoUpdates) = connection.proxy.networkMapFeed()
+            infoUpdates.notUsed()
+            val pubKeysString = otherInfo.map {
                 "    ${it.legalIdentity.name}: ${it.legalIdentity.owningKey.toBase58String()}"
             }.joinToString("\n")
-            log.info("${connection.hostName} sees\n$pubkeysString")
-            val nodeHandle = NodeHandle(configuration, connection, nodeInfo)
-            nodeHandle.waitUntilUp()
-            hostNodeHandleMap.put(connection.hostName, nodeHandle)
+            log.info("${connection.remoteNode.hostname} waiting for network map")
+            connection.proxy.waitUntilRegisteredWithNetworkMap().get()
+            log.info("${connection.remoteNode.hostname} sees\n$pubKeysString")
+            hostNodeMap.put(connection.remoteNode.hostname, connection)
         }
 
-        val networkMapNode = hostNodeHandleMap.toList().single {
-            it.second.info.advertisedServices.any { it.info.type == NetworkMapService.type }
-        }
-
-        val notaryNode = hostNodeHandleMap.toList().single {
-            it.second.info.advertisedServices.any { it.info.type.isNotary() }
-        }
-
+        val networkMapNode = hostNodeMap.values.single { it.info.advertisedServices.any { it.info.type == NetworkMapService.type } }
+        val notaryNode = hostNodeMap.values.single { it.info.advertisedServices.any { it.info.type.isNotary() } }
         val nodes = Nodes(
-                notary = notaryNode.second,
-                networkMap = networkMapNode.second,
-                simpleNodes = hostNodeHandleMap.values.filter {
-                    it.info.advertisedServices.filter {
-                        it.info.type in setOf(NetworkMapService.type, ValidatingNotaryService.type)
-                    }.isEmpty()
+                notary = notaryNode,
+                networkMap = networkMapNode,
+                simpleNodes = hostNodeMap.values.filter {
+                    it.info.advertisedServices.none {
+                        it.info.type == NetworkMapService.type || it.info.type.isNotary()
+                    }
                 }
         )
 
-        tests.forEach {
-            val (test, parameters) = it
+        tests.forEach { (test, parameters) ->
             test.run(nodes, parameters, random)
         }
     }

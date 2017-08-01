@@ -1,19 +1,19 @@
 package net.corda.irs.flows
 
 import co.paralleluniverse.fibers.Suspendable
-import net.corda.core.contracts.DealState
-import net.corda.core.crypto.AbstractParty
+import net.corda.contracts.DealState
 import net.corda.core.flows.FlowLogic
-import net.corda.core.node.CordaPluginRegistry
-import net.corda.core.node.PluginServiceHub
-import net.corda.core.serialization.SingletonSerializeAsToken
+import net.corda.core.flows.InitiatedBy
+import net.corda.core.flows.InitiatingFlow
+import net.corda.core.flows.StartableByRPC
+import net.corda.core.identity.AbstractParty
+import net.corda.core.identity.Party
 import net.corda.core.transactions.SignedTransaction
 import net.corda.core.utilities.ProgressTracker
 import net.corda.flows.TwoPartyDealFlow
 import net.corda.flows.TwoPartyDealFlow.Acceptor
 import net.corda.flows.TwoPartyDealFlow.AutoOffer
 import net.corda.flows.TwoPartyDealFlow.Instigator
-import java.util.function.Function
 
 /**
  * This whole class is really part of a demo just to initiate the agreement of a deal with a simple
@@ -23,23 +23,8 @@ import java.util.function.Function
  * or the flow would have to reach out to external systems (or users) to verify the deals.
  */
 object AutoOfferFlow {
-
-    class Plugin : CordaPluginRegistry() {
-        override val servicePlugins = listOf(Function(::Service))
-    }
-
-
-    class Service(services: PluginServiceHub) : SingletonSerializeAsToken() {
-
-        object DEALING : ProgressTracker.Step("Starting the deal flow") {
-            override fun childProgressTracker(): ProgressTracker = TwoPartyDealFlow.Secondary.tracker()
-        }
-
-        init {
-            services.registerFlowInitiator(Instigator::class) { Acceptor(it) }
-        }
-    }
-
+    @InitiatingFlow
+    @StartableByRPC
     class Requester(val dealToBeOffered: DealState) : FlowLogic<SignedTransaction>() {
 
         companion object {
@@ -65,7 +50,7 @@ object AutoOfferFlow {
             require(serviceHub.networkMapCache.notaryNodes.isNotEmpty()) { "No notary nodes registered" }
             val notary = serviceHub.networkMapCache.notaryNodes.first().notaryIdentity
             // need to pick which ever party is not us
-            val otherParty = notUs(dealToBeOffered.parties).map { serviceHub.identityService.partyFromAnonymous(it) }.requireNoNulls().single()
+            val otherParty = notUs(dealToBeOffered.participants).map { serviceHub.identityService.partyFromAnonymous(it) }.requireNoNulls().single()
             progressTracker.currentStep = DEALING
             val myKey = serviceHub.legalIdentityKey
             val instigator = Instigator(
@@ -78,15 +63,11 @@ object AutoOfferFlow {
             return stx
         }
 
-        private fun <T: AbstractParty> notUs(parties: List<T>): List<T> {
-            val notUsParties: MutableList<T> = arrayListOf()
-            for (party in parties) {
-                if (serviceHub.myInfo.legalIdentity != party) {
-                    notUsParties.add(party)
-                }
-            }
-            return notUsParties
+        private fun <T : AbstractParty> notUs(parties: List<T>): List<T> {
+            return parties.filter { serviceHub.myInfo.legalIdentity != it }
         }
-
     }
+
+    @InitiatedBy(Requester::class)
+    class AutoOfferAcceptor(otherParty: Party) : Acceptor(otherParty)
 }

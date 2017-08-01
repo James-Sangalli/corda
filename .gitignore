@@ -14,7 +14,6 @@ local.properties
 
 # General build files
 **/build/*
-!docs/build/*
 
 lib/dokka.jar
 
@@ -33,6 +32,11 @@ lib/dokka.jar
 .idea/libraries
 .idea/shelf
 .idea/dataSources
+.idea/markdown-navigator
+/gradle-plugins/.idea/
+
+# Include the -parameters compiler option by default in IntelliJ required for serialization.
+!.idea/compiler.xml
 
 # if you remove the above rule, at least ignore the following:
 
@@ -51,6 +55,7 @@ lib/dokka.jar
 # Gradle:
 # .idea/gradle.xml
 # .idea/libraries
+/gradle-plugins/gradle*
 
 # Mongo Explorer plugin:
 # .idea/mongoSettings.xml
@@ -62,7 +67,8 @@ lib/dokka.jar
 ## Plugin-specific files:
 
 # IntelliJ
-/out/
+**/out/
+/classes/
 
 # mpeltonen/sbt-idea plugin
 .idea_modules/
@@ -79,5 +85,14 @@ crashlytics-build.properties
 docs/virtualenv/
 
 # bft-smart
-node/bft-smart-config/currentView
-node/config/currentView
+**/config/currentView
+
+# vim
+*.swp
+*.swn
+*.swo
+
+# Files you may find useful to have in your working directory.
+PLAN
+NOTES
+TODO

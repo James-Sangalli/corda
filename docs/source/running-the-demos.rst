@@ -1,7 +1,8 @@
 Running the demos
 =================
 
-The Corda repository contains a number of demo programs demonstrating the functionality developed so far:
+The `Corda repository <https://github.com/corda/corda>`_ contains a number of demo programs demonstrating
+Corda's functionality:
 
 1. The Trader Demo, which shows a delivery-vs-payment atomic swap of commercial paper for cash
 2. The IRS Demo, which shows two nodes establishing an interest rate swap and performing fixings with a
@@ -9,17 +10,15 @@ The Corda repository contains a number of demo programs demonstrating the functi
 3. The Attachment Demo, which demonstrates uploading attachments to nodes
 4. The SIMM Valuation Demo, which shows two nodes agreeing on a portfolio and valuing the initial margin
    using the Standard Initial Margin Model
-5. The Distributed Notary Demo, which shows a single node getting multiple transactions notarised by a distributed (Raft-based) notary
+5. The Notary Demo, which shows three different types of notaries and a single node getting multiple transactions notarised.
 6. The Bank of Corda Demo, which shows a node acting as an issuer of assets (the Bank of Corda) while remote client
    applications request issuance of some cash on behalf of a node called Big Corporation
 
-The demos can be run either from the command line, or from inside IntelliJ. Running from the command line is
-recommended if you just want to see the demos run, whereas using IntelliJ can be helpful if you want to debug or
-extend the demos. For more details about running via the command line or from within IntelliJ, see :doc:`CLI-vs-IDE`.
+If any of the demos don't work, please raise an issue on GitHub.
 
-.. note:: If you are running the demos from the command line in Unix, you may have to install xterm.
+.. note:: If you are running the demos from the command line in Linux (but not macOS), you may have to install xterm.
 
-.. note:: If any of the demos don't work, please raise an issue on GitHub.
+.. note:: If you would like to see flow activity on the nodes type in the node terminal ``flow watch``.
 
 .. _trader-demo:
 
@@ -33,29 +32,19 @@ To run from the command line in Unix:
 
 1. Run ``./gradlew samples:trader-demo:deployNodes`` to create a set of configs and installs under ``samples/trader-demo/build/nodes``
 2. Run ``./samples/trader-demo/build/nodes/runnodes`` to open up four new terminals with the four nodes
-3. Run ``./gradlew samples:trader-demo:runBuyer`` to instruct the buyer node to request issuance of some cash from the Bank of Corda node.
-   This step will display progress information related to the cash issuance process (in the bank of corda node log output)
-4. Run ``./gradlew samples:trader-demo:runSeller`` to trigger the transaction. You can see both sides of the
-   trade print their progress and final transaction state in the bank node tabs/windows
+3. Run ``./gradlew samples:trader-demo:runBuyer`` to instruct the buyer node to request issuance of some cash from the Bank of Corda node
+4. Run ``./gradlew samples:trader-demo:runSeller`` to trigger the transaction. If you entered ``flow watch``
+you can see flows running on both sides of transaction. Additionally you should see final trade information displayed
+to your terminal.
 
 To run from the command line in Windows:
 
 1. Run ``gradlew samples:trader-demo:deployNodes`` to create a set of configs and installs under ``samples\trader-demo\build\nodes``
 2. Run ``samples\trader-demo\build\nodes\runnodes`` to open up four new terminals with the four nodes
-3. Run ``gradlew samples:trader-demo:runBuyer`` to instruct the buyer node to request issuance of some cash from the Bank of Corda node.
-   This step will display progress information related to the cash issuance process (in the Bank of Corda node log output)
-4. Run ``gradlew samples:trader-demo:runSeller`` to trigger the transaction. You can see both sides of the
-   trade print their progress and final transaction state in the bank node tabs/windows
-
-To run from IntelliJ:
-
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``Trader Demo: Run Nodes`` configuration, which will start four nodes. Once all nodes are started you will see several
-   "Node started up and registered in ..." messages
-3. Run ``Trader Demo: Run Buyer`` to instruct the buyer node to request issuance of some cash from the Bank of Corda node
-4. Run ``Trader Demo: Run Seller`` to trigger the transaction
-5. In the "Trader Demo: Run Nodes" run configuration window, you should see some log lines scroll past. Within a few seconds, the message
-   "Purchase complete - we are a happy customer!" should be printed.
+3. Run ``gradlew samples:trader-demo:runBuyer`` to instruct the buyer node to request issuance of some cash from the Bank of Corda node
+4. Run ``gradlew samples:trader-demo:runSeller`` to trigger the transaction. If you entered ``flow watch``
+you can see flows running on both sides of transaction. Additionally you should see final trade information displayed
+to your terminal.
 
 .. _irs-demo:
 
@@ -68,16 +57,10 @@ on a simulated clock passes.
 
 To run from the command line in Unix:
 
-1. Run ``./gradlew samples:irs-demo:deployNodes`` to install configs and a command line tool under ``samples/irs-demo/build``.
+1. Run ``./gradlew samples:irs-demo:deployNodes`` to install configs and a command line tool under ``samples/irs-demo/build``
 2. Run ``./gradlew samples:irs-demo:installDist``
 3. Move to the ``samples/irs-demo/build`` directory
 4. Run ``./nodes/runnodes`` to open up three new terminals with the three nodes (you may have to install xterm).
-5. Run ``./install/irs-demo/bin/irs-demo --role UploadRates``. You should see a
-   message be printed to the first node (the notary/oracle/network map node) saying that it has accepted the new
-   interest rates
-6. Now run ``./install/irs-demo/bin/irs-demo --role Trade 1``. The number is a trade ID. You should
-   see lots of activity as the nodes set up the deal, notarise it, get it signed by the oracle, and so on
-7. Now run ``./install/irs-demo/bin/irs-demo --role Date 2017-12-12`` to roll the simulated clock forward and see some fixings take place
 
 To run from the command line in Windows:
 
@@ -85,29 +68,15 @@ To run from the command line in Windows:
 2. Run ``gradlew samples:irs-demo:installDist``
 3. Move to the ``samples\irs-demo\build`` directory
 4. Run ``nodes\runnodes`` to open up three new terminals with the three nodes.
-5. Run ``install\irs-demo\bin\irs-demo --role UploadRates``. You should see a
-   message be printed to the first node (the notary/oracle/network map node) saying that it has accepted the new
-   interest rates
-6. Now run ``install\irs-demo\bin\irs-demo --role Trade 1``. The number is a trade ID. You should
-   see lots of activity as the nodes set up the deal, notarise it, get it signed by the oracle, and so on
-7. Now run ``install\irs-demo\bin\irs-demo --role Date 2017-12-12`` to roll the simulated clock forward and see some fixings take place
 
-To run from IntelliJ:
-
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``IRS Demo: Run Nodes`` configuration to start three nodes. Once all nodes are started you will see several
-   "Node started up and registered in ..." messages
-3. Run ``IRS Demo: Run Upload Rates`` to upload the new interest rates to the oracle
-4. Run ``IRS Demo: Run Trade`` to have the nodes agree on a trade
-5. Run ``IRS Demo: Run Date Change`` to roll the simulated clock forward and see some fixings take place
-6. In the "IRS Demo: Run Nodes" window you'll see a lot of activity when you run the trade and when you change the date.
-   The date change rolls the clock forwards and causes the nodes to agree on the fixings over a period.
-
-This demo also has a web app. To use this, run nodes and upload rates, then navigate to
-http://localhost:10005/web/irsdemo and http://localhost:10007/web/irsdemo to see each node's view of the ledger.
+This demo also has a web app. To use this, run nodes and then navigate to
+http://localhost:10007/web/irsdemo and http://localhost:10010/web/irsdemo to see each node's view of the ledger.
 
 To use the web app, click the "Create Deal" button, fill in the form, then click the "Submit" button. You can then
 use the time controls at the top left of the home page to run the fixings. Click any individual trade in the blotter to view it.
+
+.. note:: The IRS web UI currently has a bug when changing the clock time where it may show no numbers or apply fixings inconsistently.
+          The issues will be addressed in a future milestone release. Meanwhile, you can take a look at a simpler oracle example https://github.com/corda/oracle-example
 
 Attachment demo
 ---------------
@@ -117,7 +86,7 @@ This demo brings up three nodes, and sends a transaction containing an attachmen
 To run from the command line in Unix:
 
 1. Run ``./gradlew samples:attachment-demo:deployNodes`` to create a set of configs and installs under ``samples/attachment-demo/build/nodes``
-2. Run ``./samples/attachment-demo/build/nodes/runnodes`` to open up three new terminal tabs/windows with the three nodes
+2. Run ``./samples/attachment-demo/build/nodes/runnodes`` to open up three new terminal tabs/windows with the three nodes and webserver for BankB
 3. Run ``./gradlew samples:attachment-demo:runRecipient``, which will block waiting for a trade to start
 4. Run ``./gradlew samples:attachment-demo:runSender`` in another terminal window to send the attachment. Now look at the other windows to
    see the output of the demo
@@ -125,55 +94,49 @@ To run from the command line in Unix:
 To run from the command line in Windows:
 
 1. Run ``gradlew samples:attachment-demo:deployNodes`` to create a set of configs and installs under ``samples\attachment-demo\build\nodes``
-2. Run ``samples\attachment-demo\build\nodes\runnodes`` to open up three new terminal tabs/windows with the three nodes
+2. Run ``samples\attachment-demo\build\nodes\runnodes`` to open up three new terminal tabs/windows with the three nodes and webserver for BankB
 3. Run ``gradlew samples:attachment-demo:runRecipient``, which will block waiting for a trade to start
 4. Run ``gradlew samples:attachment-demo:runSender`` in another terminal window to send the attachment. Now look at the other windows to
    see the output of the demo
 
-To run from IntelliJ:
+.. _notary-demo:
 
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``Attachment Demo: Run Nodes`` configuration to start three nodes. Once all nodes are started you will see several
-   "Node started up and registered in ..." messages
-3. Run ``Attachment Demo: Run Recipient``, which will wait for a trade to start
-4. Run ``Attachment Demo: Run Sender`` to send the attachment
-5. In the "Attachment Demo: Run Nodes" window you should see some log lines scroll past. Within a few seconds, the
-   message "File received - we're happy!" should be printed.
+Notary demo
+-----------
 
-Raft Notary demo
-----------------
-
-This demo shows a party getting transactions notarised by a distributed `Raft <https://raft.github.io/>`_-based notary service.
-The demo will start three distributed notary nodes, and two counterparty nodes. One of the counterparties will generate transactions
-that transfer a self-issued asset to the other party and submit them for notarisation.
+This demo shows a party getting transactions notarised by either a single-node or a distributed notary service.
+All versions of the demo start two counterparty nodes.
+One of the counterparties will generate transactions that transfer a self-issued asset to the other party and submit them for notarisation.
+The `Raft <https://raft.github.io/>`_ version of the demo will start three distributed notary nodes.
+The `BFT SMaRt <https://bft-smart.github.io/library/>`_ version of the demo will start four distributed notary nodes.
 
 The output will display a list of notarised transaction IDs and corresponding signer public keys. In the Raft distributed notary,
 every node in the cluster can service client requests, and one signature is sufficient to satisfy the notary composite key requirement.
+In the BFT SMaRt distributed notary, three signatures are required.
 You will notice that successive transactions get signed by different members of the cluster (usually allocated in a random order).
 
-To run from the command line in Unix:
+To run the Raft version of the demo from the command line in Unix:
 
-1. Run ``./gradlew samples:raft-notary-demo:deployNodes``, which will create node directories with configs under ``samples/raft-notary-demo/build/nodes``.
-2. Run ``./samples/raft-notary-demo/build/nodes/runnodes``, which will start the nodes in separate terminal windows/tabs.
+1. Run ``./gradlew samples:notary-demo:deployNodes``, which will create all three types of notaries' node directories
+   with configs under ``samples/notary-demo/build/nodes/nodesRaft`` (``nodesBFT`` and ``nodesSingle`` for BFT and
+   Single notaries).
+2. Run ``./samples/notary-demo/build/nodes/nodesRaft/runnodes``, which will start the nodes in separate terminal windows/tabs.
    Wait until a "Node started up and registered in ..." message appears on each of the terminals
-3. Run ``./gradlew samples:raft-notary-demo:notarise`` to make a call to the "Party" node to initiate notarisation requests
+3. Run ``./gradlew samples:notary-demo:notarise`` to make a call to the "Party" node to initiate notarisation requests
    In a few seconds you will see a message "Notarised 10 transactions" with a list of transaction ids and the signer public keys
 
 To run from the command line in Windows:
 
-1. Run ``gradlew samples:raft-notary-demo:deployNodes``, which will create node directories with configs under ``samples\raft-notary-demo\build\nodes``.
-2. Run ``samples\raft-notary-demo\build\nodes\runnodes``, which will start the nodes in separate terminal windows/tabs.
+1. Run ``gradlew samples:notary-demo:deployNodes``, which will create all three types of notaries' node directories
+   with configs under ``samples/notary-demo/build/nodes/nodesRaft`` (``nodesBFT`` and ``nodesSingle`` for BFT and
+   Single notaries).
+2. Run ``samples\notary-demo\build\nodes\nodesRaft\runnodes``, which will start the nodes in separate terminal windows/tabs.
    Wait until a "Node started up and registered in ..." message appears on each of the terminals
-3. Run ``gradlew samples:raft-notary-demo:notarise`` to make a call to the "Party" node to initiate notarisation requests
+3. Run ``gradlew samples:notary-demo:notarise`` to make a call to the "Party" node to initiate notarisation requests
    In a few seconds you will see a message "Notarised 10 transactions" with a list of transaction ids and the signer public keys
 
-To run from IntelliJ:
-
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``Notary Demo: Run Nodes`` configuration to start the nodes. Once all nodes are started you will see several
-   "Node started up and registered in ..." messages
-3. Run the ``Notary Demo: Run Notarisation`` configuration to make a call to the "Party" node to initiate notarisation requests
-   In a few seconds you will see a message "Notarised 10 transactions" with a list of transaction ids and the signer public keys
+To run the BFT SMaRt notary demo, use ``nodesBFT`` instead of ``nodesRaft`` in the path (you will see messages from notary nodes
+trying to communicate each other sometime with connection errors, that's normal). For a single notary node, use ``nodesSingle``.
 
 Notary nodes store consumed states in a replicated commit log, which is backed by a H2 database on each node.
 You can ascertain that the commit log is synchronised across the cluster by accessing and comparing each of the nodes' backing stores
@@ -216,7 +179,7 @@ To run from the command line in Unix:
 2. Run ``./samples/bank-of-corda-demo/build/nodes/runnodes`` to open up three new terminal tabs/windows with the three nodes
 3. Run ``./gradlew samples:bank-of-corda-demo:runRPCCashIssue`` to trigger a cash issuance request
 4. Run ``./gradlew samples:bank-of-corda-demo:runWebCashIssue`` to trigger another cash issuance request.
-   Now look at the Bank of Corda terminal tab/window to see the output of the demo
+   Now look at your terminal tab/window to see the output of the demo
 
 To run from the command line in Windows:
 
@@ -224,34 +187,23 @@ To run from the command line in Windows:
 2. Run ``samples\bank-of-corda-demo\build\nodes\runnodes`` to open up three new terminal tabs/windows with the three nodes
 3. Run ``gradlew samples:bank-of-corda-demo:runRPCCashIssue`` to trigger a cash issuance request
 4. Run ``gradlew samples:bank-of-corda-demo:runWebCashIssue`` to trigger another cash issuance request.
-   Now look at the Bank of Corda terminal tab/window to see the output of the demo
-
-To run from IntelliJ:
-
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``Bank Of Corda Demo: Run Issuer`` configuration to start three nodes. Once all nodes are started you will see several
-   "Node started up and registered in ..." messages
-3. Run ``Bank Of Corda Demo: Run RPC Cash Issue`` to request issuance of some cash on behalf of Big Corporation via RPC
-4. Run ``Bank Of Corda Demo: Run Web Cash Issue`` to request issuance of some cash on behalf of Big Corporation via HTTP
+   Now look at the your terminal tab/window to see the output of the demo
 
 .. note:: To verify that the Bank of Corda node is alive and running, navigate to the following URL:
-          http://localhost:10005/api/bank/date
+          http://localhost:10007/api/bank/date
 
 .. note:: The Bank of Corda node explicitly advertises with a node service type as follows:
-          ``advertisedServices = setOf(ServiceInfo(ServiceType.corda.getSubType("issuer"))))``
+          ``advertisedServices = ["corda.issuer.USD"]``
           This allows for 3rd party applications to perform actions based on Node Type.
           For example, the Explorer tool only allows nodes of this type to issue and exit cash.
 
-In the "Bank Of Corda Demo: Run Issuer" window, you should see the following progress steps displayed:
+In the window you run the command you should see (in case of Web, RPC is simmilar):
 
-- Awaiting issuance request
-- Self issuing asset
-- Transferring asset to issuance requester
-- Confirming asset issuance to requester
-
-In the client issue request window, you should see the following printed:
-
+- Requesting Cash via Web ...
 - Successfully processed Cash Issue request
+
+If you want to see flow activity enter in node's shell ``flow watch``. It will display all state machines
+running currently on the node.
 
 Launch the Explorer application to visualize the issuance and transfer of cash for each node:
 
@@ -259,8 +211,8 @@ Launch the Explorer application to visualize the issuance and transfer of cash f
 
 Using the following login details:
 
-- For the Bank of Corda node: localhost / port 10004 / username bankUser / password test
-- For the Big Corporation node: localhost / port 10006 / username bigCorpUser / password test
+- For the Bank of Corda node: localhost / port 10006 / username bankUser / password test
+- For the Big Corporation node: localhost / port 10009 / username bigCorpUser / password test
 
 See https://docs.corda.net/node-explorer.html for further details on usage.
 
@@ -333,12 +285,7 @@ To run from the command line in Windows:
 1. Deploy the nodes using ``gradlew samples:simm-valuation-demo:deployNodes``
 2. Run the nodes using ``samples\simm-valuation-demo\build\nodes\runnodes``
 
-To run from IntelliJ:
-
-1. Open the Corda project in IntelliJ and import the Gradle project
-2. Run the ``SIMM Valuation Demo`` configuration
-
-Then, for all three:
+Then, for both Unix and Windows:
 
 3. Browse to http://localhost:10005/web/simmvaluationdemo
 4. Select the counterparty (i.e. Bank B)

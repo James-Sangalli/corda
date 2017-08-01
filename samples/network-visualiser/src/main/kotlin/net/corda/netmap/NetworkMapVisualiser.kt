@@ -11,17 +11,17 @@ import javafx.scene.input.KeyCodeCombination
 import javafx.scene.layout.VBox
 import javafx.stage.Stage
 import javafx.util.Duration
-import net.corda.core.messaging.SingleMessageRecipient
+import net.corda.core.crypto.commonName
 import net.corda.core.serialization.deserialize
 import net.corda.core.then
 import net.corda.core.utilities.ProgressTracker
 import net.corda.netmap.VisualiserViewModel.Style
+import net.corda.netmap.simulation.IRSSimulation
+import net.corda.netmap.simulation.Simulation
 import net.corda.node.services.network.NetworkMapService
 import net.corda.node.services.statemachine.SessionConfirm
 import net.corda.node.services.statemachine.SessionEnd
 import net.corda.node.services.statemachine.SessionInit
-import net.corda.simulation.IRSSimulation
-import net.corda.simulation.Simulation
 import net.corda.testing.node.InMemoryMessagingNetwork
 import net.corda.testing.node.MockNetwork
 import rx.Scheduler
@@ -52,7 +52,7 @@ class NetworkMapVisualiser : Application() {
 
     sealed class RunningPausedState {
         class Running(val tickTimer: TimerTask) : RunningPausedState()
-        class Paused() : RunningPausedState()
+        class Paused : RunningPausedState()
 
         val buttonLabel: RunPauseButtonLabel
             get() {
@@ -81,8 +81,7 @@ class NetworkMapVisualiser : Application() {
 
         val simulation = viewModel.simulation
         // Update the white-backgrounded label indicating what flow step it's up to.
-        simulation.allFlowSteps.observeOn(uiThread).subscribe { step: Pair<Simulation.SimulatedNode, ProgressTracker.Change> ->
-            val (node, change) = step
+        simulation.allFlowSteps.observeOn(uiThread).subscribe { (node, change) ->
             val label = viewModel.nodesToWidgets[node]!!.statusLabel
             if (change is ProgressTracker.Change.Position) {
                 // Fade in the status label if it's our first step.
@@ -110,9 +109,9 @@ class NetworkMapVisualiser : Application() {
             }
         }
         // Fire the message bullets between nodes.
-        simulation.network.messagingNetwork.sentMessages.observeOn(uiThread).subscribe { msg: InMemoryMessagingNetwork.MessageTransfer ->
-            val senderNode: MockNetwork.MockNode = simulation.network.addressToNode(msg.sender)
-            val destNode: MockNetwork.MockNode = simulation.network.addressToNode(msg.recipients as SingleMessageRecipient)
+        simulation.mockNet.messagingNetwork.sentMessages.observeOn(uiThread).subscribe { msg: InMemoryMessagingNetwork.MessageTransfer ->
+            val senderNode: MockNetwork.MockNode = simulation.mockNet.addressToNode(msg.sender)
+            val destNode: MockNetwork.MockNode = simulation.mockNet.addressToNode(msg.recipients)
 
             if (transferIsInteresting(msg)) {
                 viewModel.nodesToWidgets[senderNode]!!.pulseAnim.play()
@@ -157,7 +156,7 @@ class NetworkMapVisualiser : Application() {
 
         reloadStylesheet(stage)
 
-        stage.focusedProperty().addListener { value, old, new ->
+        stage.focusedProperty().addListener { _, _, new ->
             if (new) {
                 reloadStylesheet(stage)
             }
@@ -209,7 +208,7 @@ class NetworkMapVisualiser : Application() {
             viewModel.runningPausedState = newRunningPausedState
         }
         view.styleChoice.selectionModel.selectedItemProperty()
-                .addListener { ov, value, newValue -> viewModel.displayStyle = newValue }
+                .addListener { _, _, newValue -> viewModel.displayStyle = newValue }
         viewModel.simulation.dateChanges.observeOn(uiThread).subscribe { view.dateLabel.text = it.format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)) }
     }
 
@@ -219,9 +218,7 @@ class NetworkMapVisualiser : Application() {
     }
 
     private fun bindSidebar() {
-        viewModel.simulation.allFlowSteps.observeOn(uiThread).subscribe { step: Pair<Simulation.SimulatedNode, ProgressTracker.Change> ->
-            val (node, change) = step
-
+        viewModel.simulation.allFlowSteps.observeOn(uiThread).subscribe { (node, change) ->
             if (change is ProgressTracker.Change.Position) {
                 val tracker = change.tracker.topLevelTracker
                 if (change.newStep == ProgressTracker.DONE) {
@@ -237,9 +234,9 @@ class NetworkMapVisualiser : Application() {
                 } else if (!viewModel.trackerBoxes.containsKey(tracker)) {
                     // New flow started up; add.
                     val extraLabel = viewModel.simulation.extraNodeLabels[node]
-                    val label = if (extraLabel != null) "${node.info.legalIdentity.name}: $extraLabel" else node.info.legalIdentity.name
+                    val label = if (extraLabel != null) "${node.info.legalIdentity.name.commonName}: $extraLabel" else node.info.legalIdentity.name.commonName
                     val widget = view.buildProgressTrackerWidget(label, tracker.topLevelTracker)
-                    println("Added: ${tracker}, ${widget}")
+                    println("Added: $tracker, $widget")
                     viewModel.trackerBoxes[tracker] = widget
                     view.sidebar.children += widget.vbox
                 } else {
@@ -256,7 +253,7 @@ class NetworkMapVisualiser : Application() {
                     val pane = viewModel.trackerBoxes[tracker]!!.vbox
                     // Slide the other tracker widgets up and over this one.
                     val slideProp = SimpleDoubleProperty(0.0)
-                    slideProp.addListener { obv -> pane.padding = Insets(0.0, 0.0, slideProp.value, 0.0) }
+                    slideProp.addListener { _ -> pane.padding = Insets(0.0, 0.0, slideProp.value, 0.0) }
                     val timeline = Timeline(
                             KeyFrame(Duration(250.0),
                                     KeyValue(pane.opacityProperty(), 0.0),
@@ -264,7 +261,7 @@ class NetworkMapVisualiser : Application() {
                             )
                     )
                     timeline.setOnFinished {
-                        println("Removed: ${tracker}")
+                        println("Removed: $tracker")
                         val vbox = viewModel.trackerBoxes.remove(tracker)?.vbox
                         view.sidebar.children.remove(vbox)
                     }
@@ -296,7 +293,7 @@ class NetworkMapVisualiser : Application() {
                 val tracker: ProgressTracker = step.tracker.topLevelTracker
                 val widget = viewModel.trackerBoxes[tracker] ?: return@runLater
                 val new = view.buildProgressTrackerWidget(widget.label.text, tracker)
-                val prevWidget = viewModel.trackerBoxes[tracker]?.vbox ?: throw AssertionError("No previous widget for tracker: ${tracker}")
+                val prevWidget = viewModel.trackerBoxes[tracker]?.vbox ?: throw AssertionError("No previous widget for tracker: $tracker")
                 val i = (prevWidget.parent as VBox).children.indexOf(viewModel.trackerBoxes[tracker]?.vbox)
                 (prevWidget.parent as VBox).children[i] = new.vbox
                 viewModel.trackerBoxes[tracker] = new
@@ -349,7 +346,7 @@ class NetworkMapVisualiser : Application() {
         // Loopback messages are boring.
         if (transfer.sender == transfer.recipients) return false
         // Network map push acknowledgements are boring.
-        if (NetworkMapService.PUSH_ACK_FLOW_TOPIC in transfer.message.topicSession.topic) return false
+        if (NetworkMapService.PUSH_ACK_TOPIC in transfer.message.topicSession.topic) return false
         val message = transfer.message.data.deserialize<Any>()
         return when (message) {
             is SessionEnd -> false

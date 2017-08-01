@@ -1,13 +1,11 @@
 package net.corda.core.crypto
 
-import net.corda.core.crypto.MerkleTree
 import net.corda.core.crypto.SecureHash.Companion.zeroHash
+import net.corda.core.serialization.CordaSerializable
 import java.util.*
 
-
-class MerkleTreeException(val reason: String) : Exception() {
-    override fun toString() = "Partial Merkle Tree exception. Reason: $reason"
-}
+@CordaSerializable
+class MerkleTreeException(val reason: String) : Exception("Partial Merkle Tree exception. Reason: $reason")
 
 /**
  * Building and verification of Partial Merkle Tree.
@@ -43,7 +41,7 @@ class MerkleTreeException(val reason: String) : Exception() {
  * (there can be a difference in obtained leaves ordering - that's why it's a set comparison not hashing leaves into a tree).
  * If both equalities hold, we can assume that l3 and l5 belong to the transaction with root h15.
  */
-
+@CordaSerializable
 class PartialMerkleTree(val root: PartialTree) {
     /**
      * The structure is a little different than that of Merkle Tree.
@@ -52,10 +50,11 @@ class PartialMerkleTree(val root: PartialTree) {
      * transaction and leaves that just keep hashes needed for calculation. Reason for this approach: during verification
      * it's easier to extract hashes used as a base for this tree.
      */
+    @CordaSerializable
     sealed class PartialTree {
-        class IncludedLeaf(val hash: SecureHash) : PartialTree()
-        class Leaf(val hash: SecureHash) : PartialTree()
-        class Node(val left: PartialTree, val right: PartialTree) : PartialTree()
+        data class IncludedLeaf(val hash: SecureHash) : PartialTree()
+        data class Leaf(val hash: SecureHash) : PartialTree()
+        data class Node(val left: PartialTree, val right: PartialTree) : PartialTree()
     }
 
     companion object {
@@ -81,8 +80,8 @@ class PartialMerkleTree(val root: PartialTree) {
             return when (tree) {
                 is MerkleTree.Leaf -> level
                 is MerkleTree.Node -> {
-                    val l1 = checkFull(tree.left, level+1)
-                    val l2 = checkFull(tree.right, level+1)
+                    val l1 = checkFull(tree.left, level + 1)
+                    val l2 = checkFull(tree.right, level + 1)
                     if (l1 != l2) throw MerkleTreeException("Got not full binary tree.")
                     l1
                 }
@@ -103,10 +102,10 @@ class PartialMerkleTree(val root: PartialTree) {
         ): Pair<Boolean, PartialTree> {
             return when (root) {
                 is MerkleTree.Leaf ->
-                    if (root.value in includeHashes) {
-                        usedHashes.add(root.value)
-                        Pair(true, PartialTree.IncludedLeaf(root.value))
-                    } else Pair(false, PartialTree.Leaf(root.value))
+                    if (root.hash in includeHashes) {
+                        usedHashes.add(root.hash)
+                        Pair(true, PartialTree.IncludedLeaf(root.hash))
+                    } else Pair(false, PartialTree.Leaf(root.hash))
                 is MerkleTree.Node -> {
                     val leftNode = buildPartialTree(root.left, includeHashes, usedHashes)
                     val rightNode = buildPartialTree(root.right, includeHashes, usedHashes)
@@ -116,7 +115,7 @@ class PartialMerkleTree(val root: PartialTree) {
                         Pair(true, newTree)
                     } else {
                         // This node has no included leaves below. Cut the tree here and store a hash as a Leaf.
-                        val newTree = PartialTree.Leaf(root.value)
+                        val newTree = PartialTree.Leaf(root.hash)
                         Pair(false, newTree)
                     }
                 }

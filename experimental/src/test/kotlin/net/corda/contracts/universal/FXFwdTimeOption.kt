@@ -1,6 +1,6 @@
 package net.corda.contracts.universal
 
-import net.corda.core.utilities.DUMMY_NOTARY
+import net.corda.testing.DUMMY_NOTARY
 import net.corda.testing.transaction
 import org.junit.Ignore
 import org.junit.Test
@@ -43,15 +43,15 @@ class FXFwdTimeOption
     val TEST_TX_TIME_BEFORE_MATURITY: Instant get() = Instant.parse("2018-05-01T12:00:00.00Z")
     val TEST_TX_TIME_AFTER_MATURITY: Instant get() = Instant.parse("2018-06-02T12:00:00.00Z")
 
-    val inState = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), initialContract)
-    val outState1 = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), outContract1)
-    val outState2 = UniversalContract.State(listOf(DUMMY_NOTARY.owningKey), outContract2)
+    val inState = UniversalContract.State(listOf(DUMMY_NOTARY), initialContract)
+    val outState1 = UniversalContract.State(listOf(DUMMY_NOTARY), outContract1)
+    val outState2 = UniversalContract.State(listOf(DUMMY_NOTARY), outContract2)
 
     @Test
     fun `issue - signature`() {
         transaction {
             output { inState }
-            timestamp(TEST_TX_TIME_1)
+            timeWindow(TEST_TX_TIME_1)
 
             this `fails with` "transaction has a single command"
 
@@ -77,7 +77,7 @@ class FXFwdTimeOption
             output { outState1 }
             output { outState2 }
 
-            timestamp(TEST_TX_TIME_AFTER_MATURITY)
+            timeWindow(TEST_TX_TIME_AFTER_MATURITY)
 
             tweak {
                 command(highStreetBank.owningKey) { UniversalContract.Commands.Action("some undefined name") }
@@ -109,7 +109,7 @@ class FXFwdTimeOption
             output { outState1 }
             output { outState2 }
 
-            timestamp(TEST_TX_TIME_BEFORE_MATURITY)
+            timeWindow(TEST_TX_TIME_BEFORE_MATURITY)
 
             tweak {
                 command(acmeCorp.owningKey) { UniversalContract.Commands.Action("some undefined name") }
